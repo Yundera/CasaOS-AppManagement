@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
@@ -16,6 +18,7 @@ import (
 	"github.com/IceWhaleTech/CasaOS-AppManagement/service"
 	"github.com/IceWhaleTech/CasaOS-Common/utils"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
+	"github.com/compose-spec/compose-go/types"
 	"github.com/labstack/echo/v4"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
@@ -304,13 +307,66 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 	}
 
 	message := fmt.Sprintf("!! JSON format is for debugging purpose only - use `Accept: %s` HTTP header to get YAML instead !!", common.MIMEApplicationYAML)
+	data := codegen.ComposeAppWithStoreInfo{
+		StoreInfo: storeInfo,
+		Compose:   (*codegen.ComposeApp)(composeApp),
+	}
+
+	// CasaIMG fix store app for usage in container
+	dataRoot := os.Getenv("DATA_ROOT")
+	refNet := os.Getenv("REF_NET")
+	refPort := os.Getenv("REF_PORT")
+	refDomain := os.Getenv("REF_DOMAIN")
+
+	for i := range data.Compose.Services {
+		if dataRoot != "" {
+			for j := range data.Compose.Services[i].Volumes {
+				// Now safely modify the original object
+				data.Compose.Services[i].Volumes[j].Source = strings.Replace(data.Compose.Services[i].Volumes[j].Source, "/DATA", dataRoot, -1)
+			}
+		}
+
+		if refNet != "" {
+			//convert port to expose
+			for j := range data.Compose.Services[i].Ports {
+				data.Compose.Services[i].Expose = append(data.Compose.Services[i].Expose, strconv.Itoa(int(data.Compose.Services[i].Ports[j].Target)))
+			}
+			// Remove ports
+			data.Compose.Services[i].Ports = nil
+
+			// add networks for web publish
+			data.Compose.Networks = make(types.Networks) //remove default network
+			data.Compose.Networks[refNet] = types.NetworkConfig{
+				Name: refNet,
+				External: types.External{
+					External: true,
+				},
+			}
+
+			// sethostname
+			data.Compose.Services[i].Hostname = data.Compose.Name
+			data.Compose.Services[i].NetworkMode = ""
+			data.Compose.Services[i].Networks = make(map[string]*types.ServiceNetworkConfig)
+			data.Compose.Services[i].Networks[refNet] = &types.ServiceNetworkConfig{}
+		}
+	}
+
+	//update webui parameters
+	casaosExtensions, ok := data.Compose.Extensions["x-casaos"].(map[string]interface{})
+	if ok {
+		if refPort != "" {
+			casaosExtensions["port_map"] = refPort
+		}
+		if refDomain != "" && refNet != "" {
+			casaosExtensions["hostname"] = data.Compose.Name + "." + refDomain
+		}
+		//casaosExtensions["index"] = "/index.html"
+	}
+
 	return ctx.JSON(http.StatusOK, codegen.ComposeAppOK{
 		// extension properties aren't marshalled - https://github.com/golang/go/issues/6213
 		Message: &message,
-		Data: &codegen.ComposeAppWithStoreInfo{
-			StoreInfo: storeInfo,
-			Compose:   (*codegen.ComposeApp)(composeApp),
-		},
+		Data:    &data,
 	})
 }
 
