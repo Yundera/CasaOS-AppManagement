@@ -317,6 +317,8 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 	refNet := os.Getenv("REF_NET")
 	refPort := os.Getenv("REF_PORT")
 	refDomain := os.Getenv("REF_DOMAIN")
+	refScheme := os.Getenv("REF_SCHEME")
+	refSeparator := os.Getenv("REF_SEPARATOR")
 
 	for i := range data.Compose.Services {
 		if dataRoot != "" {
@@ -358,8 +360,9 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 			casaosExtensions["port_map"] = refPort
 		}
 		if refDomain != "" && refNet != "" {
-			casaosExtensions["hostname"] = data.Compose.Name + "." + refDomain
+			casaosExtensions["hostname"] = data.Compose.Name + refSeparator + refDomain
 		}
+        casaosExtensions["scheme"] = refScheme
 		//casaosExtensions["index"] = "/index.html"
 	}
 
