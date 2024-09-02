@@ -312,6 +312,17 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 		Compose:   (*codegen.ComposeApp)(composeApp),
 	}
 
+	// Marshal the original data to JSON
+	var copiedData codegen.ComposeAppWithStoreInfo
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		// Unmarshal the JSON back into the new variable
+		err = json.Unmarshal(dataBytes, &copiedData)
+		if err != nil {
+			data = copiedData
+		}
+	}
+
 	// CasaIMG fix store app for usage in container
 	dataRoot := os.Getenv("DATA_ROOT")
 	refNet := os.Getenv("REF_NET")
@@ -320,12 +331,60 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 	refScheme := os.Getenv("REF_SCHEME")
 	refSeparator := os.Getenv("REF_SEPARATOR")
 
-	for i := range data.Compose.Services {
-		if dataRoot != "" {
-			for j := range data.Compose.Services[i].Volumes {
-				// Now safely modify the original object
-				data.Compose.Services[i].Volumes[j].Source = strings.Replace(data.Compose.Services[i].Volumes[j].Source, "/DATA", dataRoot, -1)
+	//update webui parameters
+	casaosExtensions, ok := data.Compose.Extensions["x-casaos"].(map[string]interface{})
+	if ok {
+		webuiExposePort := "80"
+		initialPortStr := casaosExtensions["port_map"].(string)
+		initialPort, err := strconv.Atoi(initialPortStr)
+		if err != nil {
+			// handle error
+			initialPort = 0 // or some default value
+		}
+
+		// find the webui service
+		for j := range data.Compose.Services[0].Ports {
+			publishedPort, err := strconv.Atoi(data.Compose.Services[0].Ports[j].Published)
+			if err != nil {
+				continue
 			}
+			if publishedPort == initialPort {
+				webuiExposePort = strconv.Itoa(int(data.Compose.Services[0].Ports[j].Target))
+			}
+		}
+
+		if refPort != "" {
+			casaosExtensions["port_map"] = refPort
+		}
+		if refDomain != "" && refNet != "" {
+			casaosExtensions["hostname"] = webuiExposePort + refSeparator + data.Compose.Name + refSeparator + refDomain
+		}
+		casaosExtensions["scheme"] = refScheme
+		//casaosExtensions["index"] = "/index.html"
+
+	}
+
+	for i := range data.Compose.Services {
+
+		if dataRoot != "" {
+			// Create a new slice to hold valid volumes
+			var filteredVolumes []types.ServiceVolumeConfig
+
+			// Iterate over the service volumes
+			for j := range data.Compose.Services[i].Volumes {
+				volume := data.Compose.Services[i].Volumes[j]
+
+				// Check if the volume source starts with "/DATA"
+				if strings.HasPrefix(volume.Source, "/DATA") {
+					// Replace "/DATA" with dataRoot in the volume source
+					volume.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
+					// Add the modified volume to the filtered list
+					filteredVolumes = append(filteredVolumes, volume)
+				}
+			}
+
+			// Update the service's volumes with the filtered list
+			data.Compose.Services[i].Volumes = filteredVolumes
 		}
 
 		if refNet != "" {
@@ -351,19 +410,6 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 			data.Compose.Services[i].Networks = make(map[string]*types.ServiceNetworkConfig)
 			data.Compose.Services[i].Networks[refNet] = &types.ServiceNetworkConfig{}
 		}
-	}
-
-	//update webui parameters
-	casaosExtensions, ok := data.Compose.Extensions["x-casaos"].(map[string]interface{})
-	if ok {
-		if refPort != "" {
-			casaosExtensions["port_map"] = refPort
-		}
-		if refDomain != "" && refNet != "" {
-			casaosExtensions["hostname"] = data.Compose.Name + refSeparator + refDomain
-		}
-        casaosExtensions["scheme"] = refScheme
-		//casaosExtensions["index"] = "/index.html"
 	}
 
 	return ctx.JSON(http.StatusOK, codegen.ComposeAppOK{
