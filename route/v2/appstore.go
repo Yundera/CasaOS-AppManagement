@@ -272,6 +272,98 @@ func (a *AppManagement) ComposeAppServiceStableTag(ctx echo.Context, id codegen.
 	})
 }
 
+func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
+    compose := *composeR
+	// Now use the copiedCompose for further modifications
+	dataRoot := os.Getenv("DATA_ROOT")
+	refNet := os.Getenv("REF_NET")
+	refPort := os.Getenv("REF_PORT")
+	refDomain := os.Getenv("REF_DOMAIN")
+	refScheme := os.Getenv("REF_SCHEME")
+	refSeparator := os.Getenv("REF_SEPARATOR")
+
+    // Marshal the original data to JSON
+    var copiedData codegen.ComposeApp
+    dataBytes, err := json.Marshal(compose)
+    if err != nil {
+        // Unmarshal the JSON back into the new variable
+        err = json.Unmarshal(dataBytes, &copiedData)
+        if err != nil {
+            compose = copiedData
+        } else {
+            fmt.Println("Error during marshaling:", err)
+        }
+    } else {
+        fmt.Println("Error during unmarshaling:", err)
+    }
+
+	// Update webui parameters
+	casaosExtensions, ok := compose.Extensions["x-casaos"].(map[string]interface{})
+	if ok {
+		webuiExposePort := "80"
+		initialPortStr := casaosExtensions["port_map"].(string)
+		initialPort, err := strconv.Atoi(initialPortStr)
+		if err != nil {
+			initialPort = 0 // or some default value
+		}
+
+		// Find the webui service
+		for j := range compose.Services[0].Ports {
+			publishedPort, err := strconv.Atoi(compose.Services[0].Ports[j].Published)
+			if err != nil {
+				continue
+			}
+			if publishedPort == initialPort {
+				webuiExposePort = strconv.Itoa(int(compose.Services[0].Ports[j].Target))
+			}
+		}
+
+		if refPort != "" {
+			casaosExtensions["port_map"] = refPort
+		}
+		if refDomain != "" && refNet != "" {
+			casaosExtensions["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
+		}
+		casaosExtensions["scheme"] = refScheme
+	}
+
+	for i := range compose.Services {
+		if dataRoot != "" {
+			var filteredVolumes []types.ServiceVolumeConfig
+			for j := range compose.Services[i].Volumes {
+				volume := compose.Services[i].Volumes[j]
+				if strings.HasPrefix(volume.Source, "/DATA") {
+					volume.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
+					filteredVolumes = append(filteredVolumes, volume)
+				}
+			}
+			compose.Services[i].Volumes = filteredVolumes
+		}
+
+		if refNet != "" {
+			for j := range compose.Services[i].Ports {
+				compose.Services[i].Expose = append(compose.Services[i].Expose, strconv.Itoa(int(compose.Services[i].Ports[j].Target)))
+			}
+			compose.Services[i].Ports = nil
+
+			compose.Networks = make(types.Networks)
+			compose.Networks[refNet] = types.NetworkConfig{
+				Name: refNet,
+				External: types.External{
+					External: true,
+				},
+			}
+
+			compose.Services[i].Hostname = compose.Name
+			compose.Services[i].NetworkMode = ""
+			compose.Services[i].Networks = make(map[string]*types.ServiceNetworkConfig)
+			compose.Services[i].Networks[refNet] = &types.ServiceNetworkConfig{}
+		}
+	}
+
+	return &compose
+}
+
 func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString) error {
 	composeApp, err := service.MyService.AppStoreManagement().ComposeApp(id)
 	if err != nil {
@@ -287,7 +379,7 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 
 	accept := ctx.Request().Header.Get(echo.HeaderAccept)
 	if accept == common.MIMEApplicationYAML {
-		yaml, err := yaml.Marshal(composeApp)
+		yaml, err := yaml.Marshal(modifyComposeData((*codegen.ComposeApp)(composeApp)))
 		if err != nil {
 			message := err.Error()
 			return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{
@@ -309,107 +401,7 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 	message := fmt.Sprintf("!! JSON format is for debugging purpose only - use `Accept: %s` HTTP header to get YAML instead !!", common.MIMEApplicationYAML)
 	data := codegen.ComposeAppWithStoreInfo{
 		StoreInfo: storeInfo,
-		Compose:   (*codegen.ComposeApp)(composeApp),
-	}
-
-	// Marshal the original data to JSON
-	var copiedData codegen.ComposeAppWithStoreInfo
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		// Unmarshal the JSON back into the new variable
-		err = json.Unmarshal(dataBytes, &copiedData)
-		if err != nil {
-			data = copiedData
-		}
-	}
-
-	// CasaIMG fix store app for usage in container
-	dataRoot := os.Getenv("DATA_ROOT")
-	refNet := os.Getenv("REF_NET")
-	refPort := os.Getenv("REF_PORT")
-	refDomain := os.Getenv("REF_DOMAIN")
-	refScheme := os.Getenv("REF_SCHEME")
-	refSeparator := os.Getenv("REF_SEPARATOR")
-
-	//update webui parameters
-	casaosExtensions, ok := data.Compose.Extensions["x-casaos"].(map[string]interface{})
-	if ok {
-		webuiExposePort := "80"
-		initialPortStr := casaosExtensions["port_map"].(string)
-		initialPort, err := strconv.Atoi(initialPortStr)
-		if err != nil {
-			// handle error
-			initialPort = 0 // or some default value
-		}
-
-		// find the webui service
-		for j := range data.Compose.Services[0].Ports {
-			publishedPort, err := strconv.Atoi(data.Compose.Services[0].Ports[j].Published)
-			if err != nil {
-				continue
-			}
-			if publishedPort == initialPort {
-				webuiExposePort = strconv.Itoa(int(data.Compose.Services[0].Ports[j].Target))
-			}
-		}
-
-		if refPort != "" {
-			casaosExtensions["port_map"] = refPort
-		}
-		if refDomain != "" && refNet != "" {
-			casaosExtensions["hostname"] = webuiExposePort + refSeparator + data.Compose.Name + refSeparator + refDomain
-		}
-		casaosExtensions["scheme"] = refScheme
-		//casaosExtensions["index"] = "/index.html"
-
-	}
-
-	for i := range data.Compose.Services {
-
-		if dataRoot != "" {
-			// Create a new slice to hold valid volumes
-			var filteredVolumes []types.ServiceVolumeConfig
-
-			// Iterate over the service volumes
-			for j := range data.Compose.Services[i].Volumes {
-				volume := data.Compose.Services[i].Volumes[j]
-
-				// Check if the volume source starts with "/DATA"
-				if strings.HasPrefix(volume.Source, "/DATA") {
-					// Replace "/DATA" with dataRoot in the volume source
-					volume.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
-					// Add the modified volume to the filtered list
-					filteredVolumes = append(filteredVolumes, volume)
-				}
-			}
-
-			// Update the service's volumes with the filtered list
-			data.Compose.Services[i].Volumes = filteredVolumes
-		}
-
-		if refNet != "" {
-			//convert port to expose
-			for j := range data.Compose.Services[i].Ports {
-				data.Compose.Services[i].Expose = append(data.Compose.Services[i].Expose, strconv.Itoa(int(data.Compose.Services[i].Ports[j].Target)))
-			}
-			// Remove ports
-			data.Compose.Services[i].Ports = nil
-
-			// add networks for web publish
-			data.Compose.Networks = make(types.Networks) //remove default network
-			data.Compose.Networks[refNet] = types.NetworkConfig{
-				Name: refNet,
-				External: types.External{
-					External: true,
-				},
-			}
-
-			// sethostname
-			data.Compose.Services[i].Hostname = data.Compose.Name
-			data.Compose.Services[i].NetworkMode = ""
-			data.Compose.Services[i].Networks = make(map[string]*types.ServiceNetworkConfig)
-			data.Compose.Services[i].Networks[refNet] = &types.ServiceNetworkConfig{}
-		}
+		Compose:   modifyComposeData((*codegen.ComposeApp)(composeApp)),
 	}
 
 	return ctx.JSON(http.StatusOK, codegen.ComposeAppOK{
