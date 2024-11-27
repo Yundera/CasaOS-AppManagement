@@ -863,6 +863,10 @@ func (a *ComposeApp) HealthCheck() (bool, error) {
 	}
 
 	hostname := common.Localhost
+	if a.Name != "" {
+	    hostname = a.Name
+    }
+
 	if storeInfo.Hostname != nil && *storeInfo.Hostname != "" {
 		hostname = *storeInfo.Hostname
 	}
