@@ -302,6 +302,22 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	refDomain := os.Getenv("REF_DOMAIN")
 	refScheme := os.Getenv("REF_SCHEME")
 	refSeparator := os.Getenv("REF_SEPARATOR")
+    // if not at least one of the environment variables is set, return the original compose
+    if dataRoot == "" && refNet == "" && refPort == "" && refDomain == "" && refScheme == "" {
+        return composeR
+    }
+
+    if(refSeparator == "") {
+        refSeparator = "-"
+    }
+
+    if(refScheme == "") {
+        refScheme = "https"
+    }
+
+    if(refPort == "") {
+        refPort = "443"
+    }
 
     // Marshal the original data to JSON
     var copiedData codegen.ComposeApp
