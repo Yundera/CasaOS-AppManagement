@@ -312,11 +312,11 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
     }
 
     if(refScheme == "") {
-        refScheme = "https"
+        refScheme = "http"
     }
 
     if(refPort == "") {
-        refPort = "443"
+        refPort = "80"
     }
 
     // Marshal the original data to JSON
@@ -337,35 +337,30 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	// Update webui parameters
 	casaosExtensions, ok := compose.Extensions["x-casaos"].(map[string]interface{})
 	if ok {
-        if refScheme != "" {
-		    casaosExtensions["scheme"] = refScheme
+        casaosExtensions["scheme"] = refScheme
 
-		    // Find the webui service and update the hostname
-		    webuiExposePort := "80"
-            initialPortStr := casaosExtensions["port_map"].(string)
-            initialPort, err := strconv.Atoi(initialPortStr)
-            if err != nil {
-                initialPort = 0 // or some default value
-            }
-
-            for j := range compose.Services[0].Ports {
-                publishedPort, err := strconv.Atoi(compose.Services[0].Ports[j].Published)
-                if err != nil {
-                    continue
-                }
-                if publishedPort == initialPort {
-                    webuiExposePort = strconv.Itoa(int(compose.Services[0].Ports[j].Target))
-                }
-            }
-            if refDomain != "" && refNet != "" {
-                casaosExtensions["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
-            }
+        // Find the webui service and update the hostname
+        webuiExposePort := "80"
+        initialPortStr := casaosExtensions["port_map"].(string)
+        initialPort, err := strconv.Atoi(initialPortStr)
+        if err != nil {
+            initialPort = 0 // or some default value
         }
 
-		if refPort != "" {
-			casaosExtensions["port_map"] = refPort
-		}
+        for j := range compose.Services[0].Ports {
+            publishedPort, err := strconv.Atoi(compose.Services[0].Ports[j].Published)
+            if err != nil {
+                continue
+            }
+            if publishedPort == initialPort {
+                webuiExposePort = strconv.Itoa(int(compose.Services[0].Ports[j].Target))
+            }
+        }
+        if refDomain != "" && refNet != "" {
+            casaosExtensions["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
+        }
 
+		casaosExtensions["port_map"] = refPort
 	}
 
 	for i := range compose.Services {
@@ -381,14 +376,11 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 			compose.Services[i].Volumes = filteredVolumes
 		}
 
-        if refScheme != "" {
-            // switch from port to exposes since https is always on port 443, and we assume a https proxy is used
-			for j := range compose.Services[i].Ports {
-				compose.Services[i].Expose = append(compose.Services[i].Expose, strconv.Itoa(int(compose.Services[i].Ports[j].Target)))
-			}
-			compose.Services[i].Ports = nil
-
+        // switch from port to exposes since https is always on port 443, and we assume a https proxy is used
+        for j := range compose.Services[i].Ports {
+            compose.Services[i].Expose = append(compose.Services[i].Expose, strconv.Itoa(int(compose.Services[i].Ports[j].Target)))
         }
+        compose.Services[i].Ports = nil
 
 		if refNet != "" {
 		    //if a network is specified, remove the network mode and add the network to the service so the container is accessible on this network
