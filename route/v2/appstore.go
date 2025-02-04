@@ -294,112 +294,107 @@ func (a *AppManagement) ComposeAppServiceStableTag(ctx echo.Context, id codegen.
 }
 
 func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
-    compose := *composeR
-	// Now use the copiedCompose for further modifications
-	dataRoot := os.Getenv("DATA_ROOT")
-	refNet := os.Getenv("REF_NET")
-	refPort := os.Getenv("REF_PORT")
-	refDomain := os.Getenv("REF_DOMAIN")
-	refScheme := os.Getenv("REF_SCHEME")
-	refSeparator := os.Getenv("REF_SEPARATOR")
-    // if not at least one of the environment variables is set, return the original compose
-    if dataRoot == "" && refNet == "" && refPort == "" && refDomain == "" && refScheme == "" {
-        return composeR
-    }
-
-    if(refSeparator == "") {
-        refSeparator = "-"
-    }
-
-    if(refScheme == "") {
-        refScheme = "http"
-    }
-
-    if(refPort == "") {
-        refPort = "80"
-    }
-
-    // Marshal the original data to JSON
-    var copiedData codegen.ComposeApp
-    dataBytes, err := json.Marshal(compose)
-    if err != nil {
-        // Unmarshal the JSON back into the new variable
-        err = json.Unmarshal(dataBytes, &copiedData)
-        if err != nil {
-            compose = copiedData
-        } else {
-            fmt.Println("Error during marshaling:", err)
-        }
-    } else {
-        fmt.Println("Error during unmarshaling:", err)
-    }
-
-	// Update webui parameters
-	casaosExtensions, ok := compose.Extensions["x-casaos"].(map[string]interface{})
-	if ok {
-        casaosExtensions["scheme"] = refScheme
-
-        // Find the webui service and update the hostname
-        webuiExposePort := "80"
-        initialPortStr := casaosExtensions["port_map"].(string)
-        initialPort, err := strconv.Atoi(initialPortStr)
-        if err != nil {
-            initialPort = 0 // or some default value
-        }
-
-        for j := range compose.Services[0].Ports {
-            publishedPort, err := strconv.Atoi(compose.Services[0].Ports[j].Published)
-            if err != nil {
-                continue
-            }
-            if publishedPort == initialPort {
-                webuiExposePort = strconv.Itoa(int(compose.Services[0].Ports[j].Target))
-            }
-        }
-        if refDomain != "" && refNet != "" {
-            casaosExtensions["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
-        }
-
-		casaosExtensions["port_map"] = refPort
+	if !needsModification() {
+		return composeR
 	}
 
-	for i := range compose.Services {
-		if dataRoot != "" {
-			var filteredVolumes []types.ServiceVolumeConfig
-			for j := range compose.Services[i].Volumes {
-				volume := compose.Services[i].Volumes[j]
-				if strings.HasPrefix(volume.Source, "/DATA") {
-					volume.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
-					filteredVolumes = append(filteredVolumes, volume)
+	compose := *composeR
+	dataRoot := getEnvWithDefault("DATA_ROOT", "")
+	refNet := getEnvWithDefault("REF_NET", "")
+	refPort := getEnvWithDefault("REF_PORT", "80")
+	refDomain := getEnvWithDefault("REF_DOMAIN", "")
+	refScheme := getEnvWithDefault("REF_SCHEME", "http")
+	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
+
+	if casaosExtensions, ok := compose.Extensions["x-casaos"].(map[string]interface{}); ok {
+		extCopy := make(map[string]interface{})
+		for k, v := range casaosExtensions {
+			extCopy[k] = v
+		}
+		if extCopy["hostname"] != "" && extCopy["scheme"] != "" {
+			//takes the fist port of the first service
+			webuiExposePort := strconv.Itoa(int(compose.Services[0].Ports[0].Target))
+			fmt.Println("webuiExposePort", webuiExposePort)
+
+			compose.Extensions["x-casaos"] = extCopy
+
+			extCopy["scheme"] = refScheme
+			extCopy["port_map"] = refPort
+
+			if refDomain != "" {
+				extCopy["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
+			}
+		}
+	}
+
+	if dataRoot != "" || refNet != "" {
+		servicesCopy := make([]types.ServiceConfig, len(compose.Services))
+		for i, service := range compose.Services {
+			servicesCopy[i] = service // Shallow copy of service
+
+			if dataRoot != "" {
+				servicesCopy[i].Volumes = filterVolumes(service.Volumes, dataRoot)
+			}
+
+			servicesCopy[i].Expose = convertPortsToExpose(service.Ports)
+			servicesCopy[i].Ports = nil
+
+			if refNet != "" {
+				networksCopy := make(types.Networks)
+				networksCopy[refNet] = types.NetworkConfig{
+					Name:     refNet,
+					External: types.External{External: true},
+				}
+				compose.Networks = networksCopy
+
+				servicesCopy[i].Hostname = compose.Name
+				servicesCopy[i].NetworkMode = ""
+				servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
+					refNet: {},
 				}
 			}
-			compose.Services[i].Volumes = filteredVolumes
 		}
-
-        // switch from port to exposes since https is always on port 443, and we assume a https proxy is used
-        for j := range compose.Services[i].Ports {
-            compose.Services[i].Expose = append(compose.Services[i].Expose, strconv.Itoa(int(compose.Services[i].Ports[j].Target)))
-        }
-        compose.Services[i].Ports = nil
-
-		if refNet != "" {
-		    //if a network is specified, remove the network mode and add the network to the service so the container is accessible on this network
-			compose.Networks = make(types.Networks)
-			compose.Networks[refNet] = types.NetworkConfig{
-				Name: refNet,
-				External: types.External{
-					External: true,
-				},
-			}
-
-			compose.Services[i].Hostname = compose.Name
-			compose.Services[i].NetworkMode = ""
-			compose.Services[i].Networks = make(map[string]*types.ServiceNetworkConfig)
-			compose.Services[i].Networks[refNet] = &types.ServiceNetworkConfig{}
-		}
+		compose.Services = servicesCopy
 	}
 
 	return &compose
+}
+
+func needsModification() bool {
+	envVars := []string{"DATA_ROOT", "REF_NET", "REF_PORT", "REF_DOMAIN", "REF_SCHEME"}
+	for _, env := range envVars {
+		if os.Getenv(env) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func filterVolumes(volumes []types.ServiceVolumeConfig, dataRoot string) []types.ServiceVolumeConfig {
+	filtered := make([]types.ServiceVolumeConfig, 0)
+	for _, volume := range volumes {
+		if strings.HasPrefix(volume.Source, "/DATA") {
+			volumeCopy := volume
+			volumeCopy.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
+			filtered = append(filtered, volumeCopy)
+		}
+	}
+	return filtered
+}
+
+func convertPortsToExpose(ports []types.ServicePortConfig) []string {
+	expose := make([]string, len(ports))
+	for i, port := range ports {
+		expose[i] = strconv.Itoa(int(port.Target))
+	}
+	return expose
 }
 
 func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString) error {
