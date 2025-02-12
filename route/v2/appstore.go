@@ -293,7 +293,14 @@ func (a *AppManagement) ComposeAppServiceStableTag(ctx echo.Context, id codegen.
 	})
 }
 
+//
+
 func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
+	if composeR == nil {
+		logger.Error("failed to modify compose data - nil value")
+		return composeR
+	}
+
 	if !needsModification() {
 		return composeR
 	}
@@ -305,29 +312,69 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	refDomain := getEnvWithDefault("REF_DOMAIN", "")
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
+	logger.Info("update compose with",
+		zap.String("DATA_ROOT", dataRoot),
+		zap.String("REF_NET", refNet),
+		zap.String("REF_PORT", refPort),
+		zap.String("REF_DOMAIN", refDomain),
+		zap.String("REF_SCHEME", refScheme),
+		zap.String("REF_SEPARATOR", refSeparator))
 
-	if casaosExtensions, ok := compose.Extensions["x-casaos"].(map[string]interface{}); ok {
+	// Handle x-casaos extensions
+	if casaosExt, ok := compose.Extensions["x-casaos"]; ok {
+		casaosExtensions, ok := casaosExt.(map[string]interface{})
+		if !ok {
+			logger.Error("invalid x-casaos extension format",
+				zap.String("name", compose.Name),
+				zap.Any("extensions", casaosExt))
+			return composeR
+		}
+
 		extCopy := make(map[string]interface{})
 		for k, v := range casaosExtensions {
 			extCopy[k] = v
 		}
 		if extCopy["hostname"] != "" && extCopy["scheme"] != "" {
-			//takes the fist port of the first service
-			webuiExposePort := strconv.Itoa(int(compose.Services[0].Ports[0].Target))
-			fmt.Println("webuiExposePort", webuiExposePort)
+			if len(compose.Services) == 0 {
+				logger.Error("no services defined in compose",
+					zap.String("name", compose.Name))
+				return composeR
+			}
 
-			compose.Extensions["x-casaos"] = extCopy
+			if len(compose.Services[0].Ports) == 0 {
+				logger.Error("no ports defined for first service",
+					zap.String("name", compose.Name),
+					zap.String("service", compose.Services[0].Name))
+				return composeR
+			}
+
+			webuiExposePort := strconv.Itoa(int(compose.Services[0].Ports[0].Target))
+			logger.Info("found webui expose port",
+				zap.String("port", webuiExposePort),
+				zap.String("name", compose.Name))
 
 			extCopy["scheme"] = refScheme
 			extCopy["port_map"] = refPort
 
 			if refDomain != "" {
-				extCopy["hostname"] = webuiExposePort + refSeparator + compose.Name + refSeparator + refDomain
+				extCopy["hostname"] = fmt.Sprintf("%s%s%s%s%s",
+					webuiExposePort, refSeparator,
+					compose.Name, refSeparator,
+					refDomain)
 			}
+
+			compose.Extensions["x-casaos"] = extCopy
 		}
 	}
 
+	// Modify services if needed
 	if dataRoot != "" || refNet != "" {
+		if len(compose.Services) == 0 {
+			logger.Error("no services to modify",
+				zap.String("name", compose.Name))
+			return composeR
+		}
+
 		servicesCopy := make([]types.ServiceConfig, len(compose.Services))
 		for i, service := range compose.Services {
 			servicesCopy[i] = service // Shallow copy of service
@@ -378,7 +425,11 @@ func getEnvWithDefault(key, defaultValue string) string {
 }
 
 func filterVolumes(volumes []types.ServiceVolumeConfig, dataRoot string) []types.ServiceVolumeConfig {
-	filtered := make([]types.ServiceVolumeConfig, 0)
+	if len(volumes) == 0 {
+		return []types.ServiceVolumeConfig{}
+	}
+
+	filtered := make([]types.ServiceVolumeConfig, 0, len(volumes))
 	for _, volume := range volumes {
 		if strings.HasPrefix(volume.Source, "/DATA") {
 			volumeCopy := volume
@@ -390,12 +441,18 @@ func filterVolumes(volumes []types.ServiceVolumeConfig, dataRoot string) []types
 }
 
 func convertPortsToExpose(ports []types.ServicePortConfig) []string {
+	if len(ports) == 0 {
+		return []string{}
+	}
+
 	expose := make([]string, len(ports))
 	for i, port := range ports {
 		expose[i] = strconv.Itoa(int(port.Target))
 	}
 	return expose
 }
+
+//
 
 func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString) error {
 	composeApp, err := service.MyService.AppStoreManagement().ComposeApp(id)
