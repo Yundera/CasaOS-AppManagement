@@ -312,7 +312,7 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	refDomain := getEnvWithDefault("REF_DOMAIN", "")
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
-	logger.Info("update compose with",
+	logger.Info("PCS: update compose with",
 		zap.String("DATA_ROOT", dataRoot),
 		zap.String("REF_NET", refNet),
 		zap.String("REF_PORT", refPort),
@@ -324,7 +324,7 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	if casaosExt, ok := compose.Extensions["x-casaos"]; ok {
 		casaosExtensions, ok := casaosExt.(map[string]interface{})
 		if !ok {
-			logger.Error("invalid x-casaos extension format",
+			logger.Error("PCS: invalid x-casaos extension format",
 				zap.String("name", compose.Name),
 				zap.Any("extensions", casaosExt))
 			return composeR
@@ -336,20 +336,20 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 		}
 		if extCopy["hostname"] != "" && extCopy["scheme"] != "" {
 			if len(compose.Services) == 0 {
-				logger.Error("no services defined in compose",
+				logger.Error("PCS: no services defined in compose",
 					zap.String("name", compose.Name))
 				return composeR
 			}
 
 			if len(compose.Services[0].Ports) == 0 {
-				logger.Error("no ports defined for first service",
+				logger.Error("PCS: no ports defined for first service",
 					zap.String("name", compose.Name),
 					zap.String("service", compose.Services[0].Name))
 				return composeR
 			}
 
 			webuiExposePort := strconv.Itoa(int(compose.Services[0].Ports[0].Target))
-			logger.Info("found webui expose port",
+			logger.Info("PCS: found webui expose port",
 				zap.String("port", webuiExposePort),
 				zap.String("name", compose.Name))
 
@@ -370,7 +370,7 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	// Modify services if needed
 	if dataRoot != "" || refNet != "" {
 		if len(compose.Services) == 0 {
-			logger.Error("no services to modify",
+			logger.Error("PCS: no services to modify",
 				zap.String("name", compose.Name))
 			return composeR
 		}
