@@ -310,6 +310,8 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	refNet := getEnvWithDefault("REF_NET", "")
 	refPort := getEnvWithDefault("REF_PORT", "80")
 	refDomain := getEnvWithDefault("REF_DOMAIN", "")
+	refIp := getEnvWithDefault("REF_IP", "")
+	refpwd := getEnvWithDefault("REF_DEFAULT_PWD", "")
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
 	logger.Info("PCS: update compose with",
@@ -317,8 +319,21 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 		zap.String("REF_NET", refNet),
 		zap.String("REF_PORT", refPort),
 		zap.String("REF_DOMAIN", refDomain),
+		zap.String("REF_IP", refIp),
+		zap.String("REF_DEFAULT_PWD", refpwd),
 		zap.String("REF_SCHEME", refScheme),
 		zap.String("REF_SEPARATOR", refSeparator))
+
+	// Define variable replacements
+	replacements := map[string]string{
+		"$public_ip":   refIp,
+		"$default_pwd": refpwd,
+	}
+
+	// Apply all replacements to services
+	for i := range compose.Services {
+		applyReplacementsToService(&compose.Services[i], replacements)
+	}
 
 	// Handle x-casaos extensions
 	if casaosExt, ok := compose.Extensions["x-casaos"]; ok {
@@ -405,6 +420,97 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	}
 
 	return &compose
+}
+
+// applyReplacementsToService applies string replacements to a service configuration
+func applyReplacementsToService(service *types.ServiceConfig, replacements map[string]string) {
+	// Skip empty replacements
+	filteredReplacements := make(map[string]string)
+	for placeholder, value := range replacements {
+		if value != "" {
+			filteredReplacements[placeholder] = value
+		}
+	}
+
+	if len(filteredReplacements) == 0 {
+		return
+	}
+
+	// Replace in environment variables
+	if len(service.Environment) > 0 {
+		for k, v := range service.Environment {
+			if v != nil {
+				strValue := *v
+				modified := false
+
+				for placeholder, replacement := range filteredReplacements {
+					if strings.Contains(strValue, placeholder) {
+						strValue = strings.ReplaceAll(strValue, placeholder, replacement)
+						modified = true
+					}
+				}
+
+				if modified {
+					service.Environment[k] = &strValue
+				}
+			}
+		}
+	}
+
+	// Replace in command if it exists
+	if service.Command != nil {
+		for j, cmd := range service.Command {
+			modified := false
+			newCmd := cmd
+
+			for placeholder, replacement := range filteredReplacements {
+				if strings.Contains(cmd, placeholder) {
+					newCmd = strings.ReplaceAll(newCmd, placeholder, replacement)
+					modified = true
+				}
+			}
+
+			if modified {
+				service.Command[j] = newCmd
+			}
+		}
+	}
+
+	// Replace in entrypoint if it exists
+	if service.Entrypoint != nil {
+		for j, entry := range service.Entrypoint {
+			modified := false
+			newEntry := entry
+
+			for placeholder, replacement := range filteredReplacements {
+				if strings.Contains(entry, placeholder) {
+					newEntry = strings.ReplaceAll(newEntry, placeholder, replacement)
+					modified = true
+				}
+			}
+
+			if modified {
+				service.Entrypoint[j] = newEntry
+			}
+		}
+	}
+
+	// Replace in labels
+	for label, value := range service.Labels {
+		modified := false
+		newValue := value
+
+		for placeholder, replacement := range filteredReplacements {
+			if strings.Contains(value, placeholder) {
+				newValue = strings.ReplaceAll(newValue, placeholder, replacement)
+				modified = true
+			}
+		}
+
+		if modified {
+			service.Labels[label] = newValue
+		}
+	}
 }
 
 func needsModification() bool {
