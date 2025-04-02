@@ -45,6 +45,7 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	replacements := map[string]string{
 		"$public_ip":   refIp,
 		"$default_pwd": refpwd,
+		"$domain":      refDomain,
 	}
 
 	// Apply all replacements to services
