@@ -3,6 +3,7 @@ package v2
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -12,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
+func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	if composeR == nil {
 		logger.Error("failed to modify compose data - nil value")
 		return composeR
@@ -28,32 +29,18 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	refPort := getValidatedEnv("REF_PORT", "80", isValidPort)
 	refDomain := getEnvWithDefault("REF_DOMAIN", "")
 	refIp := getEnvWithDefault("REF_IP", "")
-	refpwd := getEnvWithDefault("REF_DEFAULT_PWD", "")
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
-	logger.Info("PCS: update compose with",
+	logger.Info("PCS: updateConectivityAndStorageComposeData",
 		zap.String("DATA_ROOT", dataRoot),
 		zap.String("REF_NET", refNet),
 		zap.String("REF_PORT", refPort),
 		zap.String("REF_DOMAIN", refDomain),
 		zap.String("REF_IP", refIp),
-		zap.String("REF_DEFAULT_PWD", refpwd),
 		zap.String("REF_SCHEME", refScheme),
 		zap.String("REF_SEPARATOR", refSeparator))
 
-	// Define variable replacements
-	replacements := map[string]string{
-		"$public_ip":   refIp,
-		"$default_pwd": refpwd,
-		"$domain":      refDomain,
-	}
-
-	// Apply all replacements to services
-	for i := range compose.Services {
-		applyReplacementsToService(&compose.Services[i], replacements)
-	}
-
-	// Update the x-casaos extensions setup scheme, port and hostname for webui link
+	// Update the x-casaos extensions setup scheme, port and hostname and build the webui link
 	useDynamicWebUIPort := false
 	if casaosExt, ok := compose.Extensions["x-casaos"]; ok {
 		casaosExtensions, ok := casaosExt.(map[string]interface{})
@@ -193,97 +180,6 @@ func modifyComposeData(composeR *codegen.ComposeApp) *codegen.ComposeApp {
 	return &compose
 }
 
-// applyReplacementsToService applies string replacements to a service configuration
-func applyReplacementsToService(service *types.ServiceConfig, replacements map[string]string) {
-	// Skip empty replacements
-	filteredReplacements := make(map[string]string)
-	for placeholder, value := range replacements {
-		if value != "" {
-			filteredReplacements[placeholder] = value
-		}
-	}
-
-	if len(filteredReplacements) == 0 {
-		return
-	}
-
-	// Replace in environment variables
-	if len(service.Environment) > 0 {
-		for k, v := range service.Environment {
-			if v != nil {
-				strValue := *v
-				modified := false
-
-				for placeholder, replacement := range filteredReplacements {
-					if strings.Contains(strValue, placeholder) {
-						strValue = strings.ReplaceAll(strValue, placeholder, replacement)
-						modified = true
-					}
-				}
-
-				if modified {
-					service.Environment[k] = &strValue
-				}
-			}
-		}
-	}
-
-	// Replace in command if it exists
-	if service.Command != nil {
-		for j, cmd := range service.Command {
-			modified := false
-			newCmd := cmd
-
-			for placeholder, replacement := range filteredReplacements {
-				if strings.Contains(cmd, placeholder) {
-					newCmd = strings.ReplaceAll(newCmd, placeholder, replacement)
-					modified = true
-				}
-			}
-
-			if modified {
-				service.Command[j] = newCmd
-			}
-		}
-	}
-
-	// Replace in entrypoint if it exists
-	if service.Entrypoint != nil {
-		for j, entry := range service.Entrypoint {
-			modified := false
-			newEntry := entry
-
-			for placeholder, replacement := range filteredReplacements {
-				if strings.Contains(entry, placeholder) {
-					newEntry = strings.ReplaceAll(newEntry, placeholder, replacement)
-					modified = true
-				}
-			}
-
-			if modified {
-				service.Entrypoint[j] = newEntry
-			}
-		}
-	}
-
-	// Replace in labels
-	for label, value := range service.Labels {
-		modified := false
-		newValue := value
-
-		for placeholder, replacement := range filteredReplacements {
-			if strings.Contains(value, placeholder) {
-				newValue = strings.ReplaceAll(newValue, placeholder, replacement)
-				modified = true
-			}
-		}
-
-		if modified {
-			service.Labels[label] = newValue
-		}
-	}
-}
-
 func needsModification() bool {
 	envVars := []string{"DATA_ROOT", "REF_NET", "REF_PORT", "REF_DOMAIN", "REF_SCHEME"}
 	for _, env := range envVars {
@@ -366,4 +262,82 @@ func convertPortsToExpose(ports []types.ServicePortConfig) []string {
 		}
 	}
 	return expose
+}
+
+func executePreInstallScript(composeApp *codegen.ComposeApp) error {
+	if composeApp == nil {
+		logger.Error("PCS: cannot execute pre-install script - nil compose app")
+		return fmt.Errorf("nil compose app")
+	}
+
+	// Check if x-casaos extension exists
+	casaosExt, ok := composeApp.Extensions["x-casaos"]
+	if !ok {
+		logger.Info("PCS: no x-casaos extension found, skipping pre-install script check")
+		return nil
+	}
+
+	// Check if it's a map
+	casaosExtensions, ok := casaosExt.(map[string]interface{})
+	if !ok {
+		logger.Error("PCS: invalid x-casaos extension format",
+			zap.String("name", composeApp.Name),
+			zap.Any("extensions", casaosExt))
+		return fmt.Errorf("invalid x-casaos extension format")
+	}
+
+	// Check for pre-install-cmd
+	preInstallCmd, exists := casaosExtensions["pre-install-cmd"]
+	if !exists || preInstallCmd == nil {
+		logger.Info("PCS: no pre-install-cmd found in x-casaos extension",
+			zap.String("name", composeApp.Name))
+		return nil
+	}
+
+	// Get the command value as string
+	cmdString, ok := preInstallCmd.(string)
+	if !ok || cmdString == "" {
+		logger.Error("PCS: invalid pre-install-cmd value",
+			zap.String("name", composeApp.Name),
+			zap.Any("command", preInstallCmd))
+		return fmt.Errorf("invalid pre-install-cmd value")
+	}
+
+	logger.Info("PCS: executing pre-install command",
+		zap.String("name", composeApp.Name),
+		zap.String("command", cmdString))
+
+	// Create a more robust command execution
+	execCmd := exec.Command("/bin/bash", "-c", cmdString)
+
+	// Set environment variables that might be needed for Docker
+	execCmd.Env = append(os.Environ(),
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"DOCKER_HOST=unix:///var/run/docker.sock")
+
+	// Ensure the command has access to standard streams
+	execCmd.Stdin = os.Stdin
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+
+	// Log command for debugging
+	logger.Info("PCS: running command",
+		zap.String("command", cmdString),
+		zap.Strings("env", execCmd.Env))
+
+	// Run the command interactively
+	err := execCmd.Run()
+	if err != nil {
+		logger.Error("PCS: failed to execute pre-install command",
+			zap.String("name", composeApp.Name),
+			zap.String("command", cmdString),
+			zap.Error(err))
+		return fmt.Errorf("pre-install command execution failed: %w", err)
+	}
+
+	logger.Info("PCS: pre-install command executed successfully",
+		zap.String("name", composeApp.Name),
+		zap.String("command", cmdString))
+
+	return nil
 }

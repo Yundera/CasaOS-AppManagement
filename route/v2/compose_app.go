@@ -257,6 +257,8 @@ func (a *AppManagement) ApplyComposeAppSettings(ctx echo.Context, id codegen.Com
 		})
 	}
 
+	executePreInstallScript((*codegen.ComposeApp)(composeApp))
+
 	// attach context key/value pairs from upstream
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
 
@@ -340,6 +342,8 @@ func (a *AppManagement) InstallComposeApp(ctx echo.Context, params codegen.Insta
 
 	// attach context key/value pairs from upstream
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
+
+	executePreInstallScript((*codegen.ComposeApp)(composeApp))
 
 	if err := service.MyService.Compose().Install(backgroundCtx, composeApp); err != nil {
 		logger.Error("failed to start compose app installation", zap.Error(err))
