@@ -31,6 +31,11 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	refIp := getEnvWithDefault("REF_IP", "")
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
+
+	// Get PUID and PGID for user rights management
+	puid := getEnvWithDefault("PUID", "0")
+	pgid := getEnvWithDefault("PGID", "0")
+
 	logger.Info("PCS: updateConectivityAndStorageComposeData",
 		zap.String("DATA_ROOT", dataRoot),
 		zap.String("REF_NET", refNet),
@@ -38,7 +43,9 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 		zap.String("REF_DOMAIN", refDomain),
 		zap.String("REF_IP", refIp),
 		zap.String("REF_SCHEME", refScheme),
-		zap.String("REF_SEPARATOR", refSeparator))
+		zap.String("REF_SEPARATOR", refSeparator),
+		zap.String("PUID", puid),
+		zap.String("PGID", pgid))
 
 	// Update the x-casaos extensions setup scheme, port and hostname and build the webui link
 	useDynamicWebUIPort := false
@@ -138,7 +145,7 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	}
 
 	// Modify services if needed
-	if dataRoot != "" || refNet != "" {
+	if dataRoot != "" || refNet != "" || shouldAddUserRights(puid, pgid) {
 		if len(compose.Services) == 0 {
 			logger.Error("PCS: no services to modify",
 				zap.String("name", compose.Name))
@@ -157,6 +164,15 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 				// If the expose port has been set dynamically, we need to update the port to expose
 				servicesCopy[i].Expose = convertPortsToExpose(service.Ports)
 				servicesCopy[i].Ports = nil
+			}
+
+			// Add user rights management
+			if shouldAddUserToService(&servicesCopy[i], puid, pgid) {
+				userString := fmt.Sprintf("%s:%s", puid, pgid)
+				servicesCopy[i].User = userString
+				logger.Info("PCS: added user rights to service",
+					zap.String("service", service.Name),
+					zap.String("user", userString))
 			}
 
 			if refNet != "" {
@@ -180,8 +196,69 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	return &compose
 }
 
+// shouldAddUserRights checks if user rights should be added based on PUID/PGID availability
+func shouldAddUserRights(puid, pgid string) bool {
+	return puid != "" && pgid != "" && isValidUID(puid) && isValidUID(pgid)
+}
+
+// shouldAddUserToService checks if user should be added to a specific service
+// Rules:
+// 1. No user already defined
+// 2. No PUID already defined in env
+// 3. PUID and PGID are valid
+func shouldAddUserToService(service *types.ServiceConfig, puid, pgid string) bool {
+	// Rule 1: Check if user is already defined
+	if service.User != "" {
+		logger.Info("PCS: service already has user defined, skipping user rights",
+			zap.String("service", service.Name),
+			zap.String("existing_user", service.User))
+		return false
+	}
+
+	// Rule 2: Check if PUID is already defined in environment variables
+	if hasPUIDInEnv(service.Environment) {
+		logger.Info("PCS: service already has PUID in environment, skipping user rights",
+			zap.String("service", service.Name))
+		return false
+	}
+
+	// Rule 3: Check if PUID and PGID are valid
+	if !isValidUID(puid) || !isValidUID(pgid) {
+		logger.Info("PCS: invalid PUID or PGID, skipping user rights",
+			zap.String("service", service.Name),
+			zap.String("puid", puid),
+			zap.String("pgid", pgid))
+		return false
+	}
+
+	return true
+}
+
+// hasPUIDInEnv checks if PUID is already defined in service environment variables
+func hasPUIDInEnv(environment types.MappingWithEquals) bool {
+	if environment == nil {
+		return false
+	}
+
+	for key := range environment {
+		if strings.ToUpper(key) == "PUID" {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidUID checks if a string represents a valid UID/GID (positive integer)
+func isValidUID(uid string) bool {
+	if uid == "" {
+		return false
+	}
+	uidInt, err := strconv.Atoi(uid)
+	return err == nil && uidInt >= 0
+}
+
 func needsModification() bool {
-	envVars := []string{"DATA_ROOT", "REF_NET", "REF_PORT", "REF_DOMAIN", "REF_SCHEME"}
+	envVars := []string{"DATA_ROOT", "REF_NET", "REF_PORT", "REF_DOMAIN", "REF_SCHEME", "PUID", "PGID"}
 	for _, env := range envVars {
 		if os.Getenv(env) != "" {
 			return true
