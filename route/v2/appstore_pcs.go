@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
@@ -33,8 +32,8 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
 
 	// Get PUID and PGID for user rights management
-	puid := getEnvWithDefault("PUID", "0")
-	pgid := getEnvWithDefault("PGID", "0")
+	puid := getEnvWithDefault("PUID", "1000")
+	pgid := getEnvWithDefault("PGID", "1000")
 
 	logger.Info("PCS: updateConectivityAndStorageComposeData",
 		zap.String("DATA_ROOT", dataRoot),
@@ -47,102 +46,8 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 		zap.String("PUID", puid),
 		zap.String("PGID", pgid))
 
-	// Update the x-casaos extensions setup scheme, port and hostname and build the webui link
-	useDynamicWebUIPort := false
-	if casaosExt, ok := compose.Extensions["x-casaos"]; ok {
-		casaosExtensions, ok := casaosExt.(map[string]interface{})
-		if !ok {
-			logger.Error("PCS: invalid x-casaos extension format",
-				zap.String("name", compose.Name),
-				zap.Any("extensions", casaosExt))
-			return composeR
-		}
-
-		extCopy := make(map[string]interface{})
-		for k, v := range casaosExtensions {
-			extCopy[k] = v
-		}
-
-		if len(compose.Services) == 0 {
-			logger.Error("PCS: no services defined in compose",
-				zap.String("name", compose.Name))
-			return composeR
-		}
-
-		webuiExposePort := "80" // Default port
-		if portVal, exists := extCopy["webui_port"]; exists && portVal != nil {
-			// Safely convert the webui_port to a string
-			switch v := portVal.(type) {
-			case float64:
-				if v > 0 && v < 65536 {
-					webuiExposePort = strconv.Itoa(int(v))
-				} else {
-					logger.Info("PCS: invalid webui_port value",
-						zap.String("name", compose.Name),
-						zap.Float64("port", v))
-				}
-			case int:
-				if v > 0 && v < 65536 {
-					webuiExposePort = strconv.Itoa(v)
-				} else {
-					logger.Info("PCS: invalid webui_port value",
-						zap.String("name", compose.Name),
-						zap.Int("port", v))
-				}
-			case string:
-				if port, err := strconv.Atoi(v); err == nil && port > 0 && port < 65536 {
-					webuiExposePort = v
-				} else {
-					logger.Info("PCS: invalid webui_port string value",
-						zap.String("name", compose.Name),
-						zap.String("port", v))
-				}
-			default:
-				logger.Info("PCS: unexpected webui_port type",
-					zap.String("name", compose.Name),
-					zap.Any("webui_port", portVal))
-			}
-		} else {
-			useDynamicWebUIPort = true
-			// Check if we have services and ports available
-			if len(compose.Services) > 0 && len(compose.Services[0].Ports) > 0 {
-				port := compose.Services[0].Ports[0].Target
-				if port > 0 && port < 65536 {
-					webuiExposePort = strconv.Itoa(int(port))
-				} else {
-					logger.Info("PCS: invalid port in service config, using default",
-						zap.String("name", compose.Name),
-						zap.Uint32("port", port))
-				}
-			} else {
-				logger.Info("PCS: no ports defined for first service, using default",
-					zap.String("name", compose.Name))
-				if len(compose.Services) > 0 {
-					logger.Info("Service without ports",
-						zap.String("service", compose.Services[0].Name))
-				}
-			}
-		}
-
-		logger.Info("PCS: found webui expose port",
-			zap.String("port", webuiExposePort),
-			zap.String("name", compose.Name))
-
-		extCopy["scheme"] = refScheme
-		extCopy["port_map"] = refPort
-
-		if refDomain != "" && isValidDomain(refDomain) {
-			extCopy["hostname"] = fmt.Sprintf("%s%s%s%s%s",
-				webuiExposePort, refSeparator,
-				compose.Name, refSeparator,
-				refDomain)
-		} else if refDomain != "" {
-			logger.Info("PCS: invalid domain name provided",
-				zap.String("domain", refDomain))
-		}
-
-		compose.Extensions["x-casaos"] = extCopy
-	}
+	// Update the x-casaos extensions
+	useDynamicWebUIPort := updateCasaOSExtensions(&compose, refScheme, refPort, refDomain, refSeparator)
 
 	// Modify services if needed
 	if dataRoot != "" || refNet != "" || shouldAddUserRights(puid, pgid) {
@@ -152,193 +57,164 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 			return composeR
 		}
 
-		servicesCopy := make([]types.ServiceConfig, len(compose.Services))
-		for i, service := range compose.Services {
-			servicesCopy[i] = service // Shallow copy of service
-
-			if dataRoot != "" {
-				servicesCopy[i].Volumes = filterVolumes(service.Volumes, dataRoot)
-			}
-
-			if useDynamicWebUIPort {
-				// If the expose port has been set dynamically, we need to update the port to expose
-				servicesCopy[i].Expose = convertPortsToExpose(service.Ports)
-				servicesCopy[i].Ports = nil
-			}
-
-			// Add user rights management
-			if shouldAddUserToService(&servicesCopy[i], puid, pgid) {
-				userString := fmt.Sprintf("%s:%s", puid, pgid)
-				servicesCopy[i].User = userString
-				logger.Info("PCS: added user rights to service",
-					zap.String("service", service.Name),
-					zap.String("user", userString))
-			}
-
-			if refNet != "" {
-				networksCopy := make(types.Networks)
-				networksCopy[refNet] = types.NetworkConfig{
-					Name:     refNet,
-					External: types.External{External: true},
-				}
-				compose.Networks = networksCopy
-
-				servicesCopy[i].Hostname = compose.Name
-				servicesCopy[i].NetworkMode = ""
-				servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
-					refNet: {},
-				}
-			}
-		}
-		compose.Services = servicesCopy
+		modifyServices(&compose, dataRoot, refNet, useDynamicWebUIPort, puid, pgid)
 	}
 
 	return &compose
 }
 
-// shouldAddUserRights checks if user rights should be added based on PUID/PGID availability
-func shouldAddUserRights(puid, pgid string) bool {
-	return puid != "" && pgid != "" && isValidUID(puid) && isValidUID(pgid)
+func updateCasaOSExtensions(compose *codegen.ComposeApp, refScheme, refPort, refDomain, refSeparator string) bool {
+	useDynamicWebUIPort := false
+
+	casaosExt, ok := compose.Extensions["x-casaos"]
+	if !ok {
+		return useDynamicWebUIPort
+	}
+
+	casaosExtensions, ok := casaosExt.(map[string]interface{})
+	if !ok {
+		logger.Error("PCS: invalid x-casaos extension format",
+			zap.String("name", compose.Name),
+			zap.Any("extensions", casaosExt))
+		return useDynamicWebUIPort
+	}
+
+	extCopy := make(map[string]interface{})
+	for k, v := range casaosExtensions {
+		extCopy[k] = v
+	}
+
+	if len(compose.Services) == 0 {
+		logger.Error("PCS: no services defined in compose",
+			zap.String("name", compose.Name))
+		return useDynamicWebUIPort
+	}
+
+	webuiExposePort := determineWebUIPort(extCopy, compose, &useDynamicWebUIPort)
+
+	logger.Info("PCS: found webui expose port",
+		zap.String("port", webuiExposePort),
+		zap.String("name", compose.Name))
+
+	extCopy["scheme"] = refScheme
+	extCopy["port_map"] = refPort
+
+	if refDomain != "" && isValidDomain(refDomain) {
+		extCopy["hostname"] = fmt.Sprintf("%s%s%s%s%s",
+			webuiExposePort, refSeparator,
+			compose.Name, refSeparator,
+			refDomain)
+	} else if refDomain != "" {
+		logger.Info("PCS: invalid domain name provided",
+			zap.String("domain", refDomain))
+	}
+
+	compose.Extensions["x-casaos"] = extCopy
+	return useDynamicWebUIPort
 }
 
-// shouldAddUserToService checks if user should be added to a specific service
-// Rules:
-// 1. No user already defined
-// 2. No PUID already defined in env
-// 3. PUID and PGID are valid
-func shouldAddUserToService(service *types.ServiceConfig, puid, pgid string) bool {
-	// Rule 1: Check if user is already defined
-	if service.User != "" {
-		logger.Info("PCS: service already has user defined, skipping user rights",
-			zap.String("service", service.Name),
-			zap.String("existing_user", service.User))
-		return false
-	}
+func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.ComposeApp, useDynamicWebUIPort *bool) string {
+	webuiExposePort := "80" // Default port
 
-	// Rule 2: Check if PUID is already defined in environment variables
-	if hasPUIDInEnv(service.Environment) {
-		logger.Info("PCS: service already has PUID in environment, skipping user rights",
-			zap.String("service", service.Name))
-		return false
-	}
-
-	// Rule 3: Check if PUID and PGID are valid
-	if !isValidUID(puid) || !isValidUID(pgid) {
-		logger.Info("PCS: invalid PUID or PGID, skipping user rights",
-			zap.String("service", service.Name),
-			zap.String("puid", puid),
-			zap.String("pgid", pgid))
-		return false
-	}
-
-	return true
-}
-
-// hasPUIDInEnv checks if PUID is already defined in service environment variables
-func hasPUIDInEnv(environment types.MappingWithEquals) bool {
-	if environment == nil {
-		return false
-	}
-
-	for key := range environment {
-		if strings.ToUpper(key) == "PUID" {
-			return true
+	if portVal, exists := extCopy["webui_port"]; exists && portVal != nil {
+		// Safely convert the webui_port to a string
+		switch v := portVal.(type) {
+		case float64:
+			if v > 0 && v < 65536 {
+				webuiExposePort = strconv.Itoa(int(v))
+			} else {
+				logger.Info("PCS: invalid webui_port value",
+					zap.String("name", compose.Name),
+					zap.Float64("port", v))
+			}
+		case int:
+			if v > 0 && v < 65536 {
+				webuiExposePort = strconv.Itoa(v)
+			} else {
+				logger.Info("PCS: invalid webui_port value",
+					zap.String("name", compose.Name),
+					zap.Int("port", v))
+			}
+		case string:
+			if port, err := strconv.Atoi(v); err == nil && port > 0 && port < 65536 {
+				webuiExposePort = v
+			} else {
+				logger.Info("PCS: invalid webui_port string value",
+					zap.String("name", compose.Name),
+					zap.String("port", v))
+			}
+		default:
+			logger.Info("PCS: unexpected webui_port type",
+				zap.String("name", compose.Name),
+				zap.Any("webui_port", portVal))
 		}
-	}
-	return false
-}
-
-// isValidUID checks if a string represents a valid UID/GID (positive integer)
-func isValidUID(uid string) bool {
-	if uid == "" {
-		return false
-	}
-	uidInt, err := strconv.Atoi(uid)
-	return err == nil && uidInt >= 0
-}
-
-func needsModification() bool {
-	envVars := []string{"DATA_ROOT", "REF_NET", "REF_PORT", "REF_DOMAIN", "REF_SCHEME", "PUID", "PGID"}
-	for _, env := range envVars {
-		if os.Getenv(env) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// getValidatedEnv retrieves an environment variable with validation
-func getValidatedEnv(key, defaultValue string, validator func(string) bool) string {
-	value := os.Getenv(key)
-	if value != "" {
-		if validator(value) {
-			return value
-		}
-		logger.Info("Invalid environment variable value",
-			zap.String("key", key),
-			zap.String("value", value),
-			zap.String("using_default", defaultValue))
-	}
-	return defaultValue
-}
-
-// isValidPort checks if a string represents a valid port number
-func isValidPort(s string) bool {
-	port, err := strconv.Atoi(s)
-	return err == nil && port > 0 && port < 65536
-}
-
-// isValidDomain performs basic validation on domain names
-func isValidDomain(domain string) bool {
-	return len(domain) > 0 && !strings.ContainsAny(domain, " \t\n\r")
-}
-
-func filterVolumes(volumes []types.ServiceVolumeConfig, dataRoot string) []types.ServiceVolumeConfig {
-	if len(volumes) == 0 {
-		return []types.ServiceVolumeConfig{}
-	}
-
-	// Count matching volumes first to allocate correct capacity
-	matchCount := 0
-	for _, volume := range volumes {
-		if strings.HasPrefix(volume.Source, "/DATA") {
-			matchCount++
-		}
-	}
-
-	filtered := make([]types.ServiceVolumeConfig, 0, matchCount)
-	for _, volume := range volumes {
-		if strings.HasPrefix(volume.Source, "/DATA") {
-			volumeCopy := volume
-			volumeCopy.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
-			filtered = append(filtered, volumeCopy)
-		}
-	}
-	return filtered
-}
-
-func convertPortsToExpose(ports []types.ServicePortConfig) []string {
-	if len(ports) == 0 {
-		return []string{}
-	}
-
-	expose := make([]string, 0, len(ports))
-	for _, port := range ports {
-		if port.Target > 0 && port.Target < 65536 {
-			expose = append(expose, strconv.Itoa(int(port.Target)))
+	} else {
+		*useDynamicWebUIPort = true
+		// Check if we have services and ports available
+		if len(compose.Services) > 0 && len(compose.Services[0].Ports) > 0 {
+			port := compose.Services[0].Ports[0].Target
+			if port > 0 && port < 65536 {
+				webuiExposePort = strconv.Itoa(int(port))
+			} else {
+				logger.Info("PCS: invalid port in service config, using default",
+					zap.String("name", compose.Name),
+					zap.Uint32("port", port))
+			}
 		} else {
-			logger.Info("Skipping invalid port in convertPortsToExpose",
-				zap.Uint32("port", port.Target))
+			logger.Info("PCS: no ports defined for first service, using default",
+				zap.String("name", compose.Name))
+			if len(compose.Services) > 0 {
+				logger.Info("Service without ports",
+					zap.String("service", compose.Services[0].Name))
+			}
 		}
 	}
-	return expose
+
+	return webuiExposePort
+}
+
+func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, useDynamicWebUIPort bool, puid, pgid string) {
+	servicesCopy := make([]types.ServiceConfig, len(compose.Services))
+
+	for i, service := range compose.Services {
+		servicesCopy[i] = service // Shallow copy of service
+
+		if dataRoot != "" {
+			servicesCopy[i].Volumes = filterVolumes(service.Volumes, dataRoot)
+		}
+
+		if useDynamicWebUIPort {
+			// If the expose port has been set dynamically, we need to update the port to expose
+			servicesCopy[i].Expose = convertPortsToExpose(service.Ports)
+			servicesCopy[i].Ports = nil
+		}
+
+		// Add user rights management
+		if shouldAddUserToService(&servicesCopy[i], puid, pgid) {
+			userString := fmt.Sprintf("%s:%s", puid, pgid)
+			servicesCopy[i].User = userString
+			logger.Info("PCS: added user rights to service",
+				zap.String("service", service.Name),
+				zap.String("user", userString))
+		}
+
+		if refNet != "" {
+			networksCopy := make(types.Networks)
+			networksCopy[refNet] = types.NetworkConfig{
+				Name:     refNet,
+				External: types.External{External: true},
+			}
+			compose.Networks = networksCopy
+
+			servicesCopy[i].Hostname = compose.Name
+			servicesCopy[i].NetworkMode = ""
+			servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
+				refNet: {},
+			}
+		}
+	}
+
+	compose.Services = servicesCopy
 }
 
 func executePreInstallScript(composeApp *codegen.ComposeApp) error {
