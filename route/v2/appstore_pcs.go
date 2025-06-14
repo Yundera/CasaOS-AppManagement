@@ -109,8 +109,64 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp, refScheme, refPort, ref
 			zap.String("domain", refDomain))
 	}
 
+	// Expand environment variables in tips.before_install
+	expandTipsBeforeInstall(extCopy, compose.Name)
+
 	compose.Extensions["x-casaos"] = extCopy
 	return useDynamicWebUIPort
+}
+
+// expandTipsBeforeInstall expands environment variables in the tips.before_install field
+func expandTipsBeforeInstall(extCopy map[string]interface{}, appName string) {
+	// Check if tips exists
+	tipsInterface, hasTips := extCopy["tips"]
+	if !hasTips {
+		return
+	}
+
+	tips, ok := tipsInterface.(map[string]interface{})
+	if !ok {
+		logger.Error("PCS: invalid tips format in x-casaos extension",
+			zap.String("name", appName),
+			zap.Any("tips", tipsInterface))
+		return
+	}
+
+	// Check if before_install exists
+	beforeInstallInterface, hasBeforeInstall := tips["before_install"]
+	if !hasBeforeInstall {
+		return
+	}
+
+	beforeInstall, ok := beforeInstallInterface.(map[string]interface{})
+	if !ok {
+		logger.Error("PCS: invalid before_install format in tips",
+			zap.String("name", appName),
+			zap.Any("before_install", beforeInstallInterface))
+		return
+	}
+
+	// Expand environment variables in each before_install entry
+	for lang, valueInterface := range beforeInstall {
+		if value, ok := valueInterface.(string); ok {
+			expandedValue := expandEnvVars(value)
+			if expandedValue != value {
+				logger.Info("PCS: expanded environment variables in tips.before_install",
+					zap.String("name", appName),
+					zap.String("language", lang),
+					zap.String("original", value),
+					zap.String("expanded", expandedValue))
+			}
+			beforeInstall[lang] = expandedValue
+		}
+	}
+}
+
+// expandEnvVars expands environment variables in the format $VAR or ${VAR}
+func expandEnvVars(text string) string {
+	// Use os.Expand which handles both $VAR and ${VAR} formats
+	// and automatically uses all available OS environment variables
+	return os.Expand(text, os.Getenv)
 }
 
 func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.ComposeApp, useDynamicWebUIPort *bool) string {
