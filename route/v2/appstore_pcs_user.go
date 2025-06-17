@@ -16,32 +16,40 @@ func shouldAddUserRights(puid, pgid string) bool {
 
 // shouldAddUserToService checks if user should be added to a specific service
 // Rules:
-// 1. No user already defined
-// 2. No PUID already defined in env
-// 3. PUID and PGID are valid
+// 1. Skip only if BOTH user is defined AND PUID is defined in env
+// 2. PUID and PGID must be valid
 func shouldAddUserToService(service *types.ServiceConfig, puid, pgid string) bool {
-	// Rule 1: Check if user is already defined
-	if service.User != "" {
-		logger.Info("PCS: service already has user defined, skipping user rights",
+	// Rule 1: Check if BOTH user is defined AND PUID is in environment
+	hasUser := service.User != ""
+	hasPUID := hasPUIDInEnv(service.Environment)
+	
+	if hasUser && hasPUID {
+		logger.Info("PCS: service has both user defined and PUID in environment, skipping user rights",
 			zap.String("service", service.Name),
 			zap.String("existing_user", service.User))
 		return false
 	}
 
-	// Rule 2: Check if PUID is already defined in environment variables
-	if hasPUIDInEnv(service.Environment) {
-		logger.Info("PCS: service already has PUID in environment, skipping user rights",
-			zap.String("service", service.Name))
-		return false
-	}
-
-	// Rule 3: Check if PUID and PGID are valid
+	// Rule 2: Check if PUID and PGID are valid
 	if !isValidUID(puid) || !isValidUID(pgid) {
 		logger.Info("PCS: invalid PUID or PGID, skipping user rights",
 			zap.String("service", service.Name),
 			zap.String("puid", puid),
 			zap.String("pgid", pgid))
 		return false
+	}
+
+	// Log what we're adding if we proceed
+	if hasUser {
+		logger.Info("PCS: service has user defined but no PUID in env, will add environment variables",
+			zap.String("service", service.Name),
+			zap.String("existing_user", service.User))
+	} else if hasPUID {
+		logger.Info("PCS: service has PUID in env but no user defined, will add user field",
+			zap.String("service", service.Name))
+	} else {
+		logger.Info("PCS: service has neither user nor PUID defined, will add both",
+			zap.String("service", service.Name))
 	}
 
 	return true
