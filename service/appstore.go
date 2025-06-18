@@ -36,7 +36,7 @@ type appStore struct {
 	recommend   []string
 	url         string
 
-	lastAPPStoreSize int64
+	lastAPPStoreSize string
 }
 
 var (
@@ -87,15 +87,15 @@ func (s *appStore) UpdateCatalog() error {
 		if res.StatusCode != http.StatusOK {
 			return fmt.Errorf("failed to get appstore size, status code: %d", res.StatusCode)
 		}
-		if res.ContentLength == s.lastAPPStoreSize {
-			logger.Info("appstore size not changed", zap.String("url", s.url))
+		if res.Header.Get("ETag") == s.lastAPPStoreSize {
+			logger.Info("appstore size not changed", zap.String("url", s.url), zap.String("etag", s.lastAPPStoreSize))
 			return nil
 		}
 		logger.Info("appstore size changed, update app store", zap.String("url", s.url))
 
 		defer func() {
 			if isSuccessful {
-				s.lastAPPStoreSize = res.ContentLength
+				s.lastAPPStoreSize = res.Header.Get("ETag")
 			}
 		}()
 	}
