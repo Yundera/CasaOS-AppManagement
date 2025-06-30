@@ -25,11 +25,6 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	compose := *composeR
 	dataRoot := getEnvWithDefault("DATA_ROOT", "")
 	refNet := getEnvWithDefault("REF_NET", "")
-	refPort := getValidatedEnv("REF_PORT", "80", isValidPort)
-	refDomain := getEnvWithDefault("REF_DOMAIN", "")
-	refIp := getEnvWithDefault("REF_IP", "")
-	refScheme := getEnvWithDefault("REF_SCHEME", "http")
-	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
 
 	// Get PUID and PGID for user rights management
 	puid := getEnvWithDefault("PUID", "1000")
@@ -38,16 +33,11 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	logger.Info("PCS: updateConectivityAndStorageComposeData",
 		zap.String("DATA_ROOT", dataRoot),
 		zap.String("REF_NET", refNet),
-		zap.String("REF_PORT", refPort),
-		zap.String("REF_DOMAIN", refDomain),
-		zap.String("REF_IP", refIp),
-		zap.String("REF_SCHEME", refScheme),
-		zap.String("REF_SEPARATOR", refSeparator),
 		zap.String("PUID", puid),
 		zap.String("PGID", pgid))
 
 	// Update the x-casaos extensions
-	useDynamicWebUIPort := updateCasaOSExtensions(&compose, refScheme, refPort, refDomain, refSeparator)
+	useDynamicWebUIPort := updateCasaOSExtensions(&compose)
 
 	// Modify services if needed
 	if dataRoot != "" || refNet != "" || shouldAddUserRights(puid, pgid) {
@@ -63,8 +53,23 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 	return &compose
 }
 
-func updateCasaOSExtensions(compose *codegen.ComposeApp, refScheme, refPort, refDomain, refSeparator string) bool {
+func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 	useDynamicWebUIPort := false
+
+	// Read environment variables inside the function
+	refScheme := getEnvWithDefault("REF_SCHEME", "http")
+	refPort := getValidatedEnv("REF_PORT", "80", isValidPort)
+	refDomain := getEnvWithDefault("REF_DOMAIN", "")
+	refSeparator := getEnvWithDefault("REF_SEPARATOR", "-")
+	refDefaultPort := getEnvWithDefault("REF_DEFAULT_PORT", "80")
+
+	logger.Info("PCS: updateCasaOSExtensions - environment variables",
+		zap.String("name", compose.Name),
+		zap.String("REF_SCHEME", refScheme),
+		zap.String("REF_PORT", refPort),
+		zap.String("REF_DOMAIN", refDomain),
+		zap.String("REF_SEPARATOR", refSeparator),
+		zap.String("REF_DEFAULT_PORT", refDefaultPort))
 
 	casaosExt, ok := compose.Extensions["x-casaos"]
 	if !ok {
@@ -100,10 +105,27 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp, refScheme, refPort, ref
 	extCopy["port_map"] = refPort
 
 	if refDomain != "" && isValidDomain(refDomain) {
-		extCopy["hostname"] = fmt.Sprintf("%s%s%s%s%s",
-			webuiExposePort, refSeparator,
-			compose.Name, refSeparator,
-			refDomain)
+		// Check if the webui port matches the default port
+		if webuiExposePort == refDefaultPort {
+			// Use format without port prefix: service-domain
+			extCopy["hostname"] = fmt.Sprintf("%s%s%s",
+				compose.Name, refSeparator,
+				refDomain)
+			logger.Info("PCS: using default port, hostname without port prefix",
+				zap.String("hostname", extCopy["hostname"].(string)),
+				zap.String("port", webuiExposePort),
+				zap.String("default_port", refDefaultPort))
+		} else {
+			// Use original format with port prefix: port-service-domain
+			extCopy["hostname"] = fmt.Sprintf("%s%s%s%s%s",
+				webuiExposePort, refSeparator,
+				compose.Name, refSeparator,
+				refDomain)
+			logger.Info("PCS: using non-default port, hostname with port prefix",
+				zap.String("hostname", extCopy["hostname"].(string)),
+				zap.String("port", webuiExposePort),
+				zap.String("default_port", refDefaultPort))
+		}
 	} else if refDomain != "" {
 		logger.Info("PCS: invalid domain name provided",
 			zap.String("domain", refDomain))
