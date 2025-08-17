@@ -451,15 +451,6 @@ func (ds *dockerService) CreateContainer(m model.CustomizationPostData, id strin
 			}
 		}
 		path = strings.ReplaceAll(path, "$AppID", m.Label)
-		// reg1 := regexp.MustCompile(`([^<>/\\\|:""\*\?]+\.\w+$)`)
-		// result1 := reg1.FindAllStringSubmatch(path, -1)
-		// if len(result1) == 0 {
-		err = file.IsNotExistMkDir(path)
-		if err != nil {
-			logger.Error("Failed to create a folder", zap.Any("err", err))
-			continue
-		}
-		//}
 		//  else {
 		// 	err = file.IsNotExistCreateFile(path)
 		// 	if err != nil {

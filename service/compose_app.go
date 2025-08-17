@@ -394,13 +394,6 @@ func (a *ComposeApp) UpWithCheckRequire(ctx context.Context, service api.Service
 				continue
 			}
 
-			path := volume.Source
-			if err := file.IsNotExistMkDir(path); err != nil {
-				go PublishEventWrapper(ctx, common.EventTypeContainerStartError, map[string]string{
-					common.PropertyTypeMessage.Name: err.Error(),
-				})
-				return err
-			}
 		}
 
 		// check if each required device exists
@@ -514,14 +507,7 @@ func (a *ComposeApp) PullAndInstall(ctx context.Context) error {
 					continue
 				}
 
-				path := volume.Source
-				if err := file.IsNotExistMkDir(path); err != nil {
-					go PublishEventWrapper(ctx, common.EventTypeContainerCreateError, map[string]string{
-						common.PropertyTypeMessage.Name: err.Error(),
-					})
-					return err
 				}
-			}
 
 			// check if each required device exists
 			deviceMapFiltered := []string{}
