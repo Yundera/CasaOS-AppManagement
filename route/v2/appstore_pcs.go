@@ -37,7 +37,7 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 		zap.String("PGID", pgid))
 
 	// Update the x-casaos extensions
-	useDynamicWebUIPort := updateCasaOSExtensions(&compose)
+	updateCasaOSExtensions(&compose)
 
 	// Modify services if needed
 	if dataRoot != "" || refNet != "" || shouldAddUserRights(puid, pgid) {
@@ -47,14 +47,13 @@ func updateConectivityAndStorageComposeData(composeR *codegen.ComposeApp) *codeg
 			return composeR
 		}
 
-		modifyServices(&compose, dataRoot, refNet, useDynamicWebUIPort, puid, pgid)
+		modifyServices(&compose, dataRoot, refNet, puid, pgid)
 	}
 
 	return &compose
 }
 
-func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
-	useDynamicWebUIPort := false
+func updateCasaOSExtensions(compose *codegen.ComposeApp) {
 
 	// Read environment variables inside the function
 	refScheme := getEnvWithDefault("REF_SCHEME", "http")
@@ -73,7 +72,7 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 
 	casaosExt, ok := compose.Extensions["x-casaos"]
 	if !ok {
-		return useDynamicWebUIPort
+		return
 	}
 
 	casaosExtensions, ok := casaosExt.(map[string]interface{})
@@ -81,7 +80,7 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 		logger.Error("PCS: invalid x-casaos extension format",
 			zap.String("name", compose.Name),
 			zap.Any("extensions", casaosExt))
-		return useDynamicWebUIPort
+		return
 	}
 
 	extCopy := make(map[string]interface{})
@@ -92,19 +91,27 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 	if len(compose.Services) == 0 {
 		logger.Error("PCS: no services defined in compose",
 			zap.String("name", compose.Name))
-		return useDynamicWebUIPort
+		return
 	}
 
-	webuiExposePort := determineWebUIPort(extCopy, compose, &useDynamicWebUIPort)
+	webuiExposePort := determineWebUIPort(extCopy, compose)
 
 	logger.Info("PCS: found webui expose port",
 		zap.String("port", webuiExposePort),
 		zap.String("name", compose.Name))
 
-	extCopy["scheme"] = refScheme
-	extCopy["port_map"] = refPort
+	// Only set scheme if not already defined
+	if _, exists := extCopy["scheme"]; !exists {
+		extCopy["scheme"] = refScheme
+	}
 
-	if refDomain != "" && isValidDomain(refDomain) {
+	// Only set port_map if not already defined
+	if _, exists := extCopy["port_map"]; !exists {
+		extCopy["port_map"] = refPort
+	}
+
+	// Only set hostname if not already defined and refDomain is provided
+	if _, exists := extCopy["hostname"]; !exists && refDomain != "" && isValidDomain(refDomain) {
 		// Check if the webui port matches the default port
 		if webuiExposePort == refDefaultPort {
 			// Use format without port prefix: service-domain
@@ -126,7 +133,7 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 				zap.String("port", webuiExposePort),
 				zap.String("default_port", refDefaultPort))
 		}
-	} else if refDomain != "" {
+	} else if refDomain != "" && !isValidDomain(refDomain) {
 		logger.Info("PCS: invalid domain name provided",
 			zap.String("domain", refDomain))
 	}
@@ -135,7 +142,6 @@ func updateCasaOSExtensions(compose *codegen.ComposeApp) bool {
 	expandTipsBeforeInstall(extCopy, compose.Name)
 
 	compose.Extensions["x-casaos"] = extCopy
-	return useDynamicWebUIPort
 }
 
 // expandTipsBeforeInstall expands environment variables in the tips.before_install field
@@ -191,7 +197,7 @@ func expandEnvVars(text string) string {
 	return os.Expand(text, os.Getenv)
 }
 
-func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.ComposeApp, useDynamicWebUIPort *bool) string {
+func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.ComposeApp) string {
 	webuiExposePort := "80" // Default port
 
 	if portVal, exists := extCopy["webui_port"]; exists && portVal != nil {
@@ -226,32 +232,11 @@ func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.Compose
 				zap.String("name", compose.Name),
 				zap.Any("webui_port", portVal))
 		}
-	} else {
-		*useDynamicWebUIPort = true
-		// Check if we have services and ports available
-		if len(compose.Services) > 0 && len(compose.Services[0].Ports) > 0 {
-			port := compose.Services[0].Ports[0].Target
-			if port > 0 && port < 65536 {
-				webuiExposePort = strconv.Itoa(int(port))
-			} else {
-				logger.Info("PCS: invalid port in service config, using default",
-					zap.String("name", compose.Name),
-					zap.Uint32("port", port))
-			}
-		} else {
-			logger.Info("PCS: no ports defined for first service, using default",
-				zap.String("name", compose.Name))
-			if len(compose.Services) > 0 {
-				logger.Info("Service without ports",
-					zap.String("service", compose.Services[0].Name))
-			}
-		}
 	}
-
 	return webuiExposePort
 }
 
-func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, useDynamicWebUIPort bool, puid, pgid string) {
+func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, puid, pgid string) {
 	servicesCopy := make([]types.ServiceConfig, len(compose.Services))
 
 	for i, service := range compose.Services {
@@ -259,12 +244,6 @@ func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, useDyn
 
 		if dataRoot != "" {
 			servicesCopy[i].Volumes = filterVolumes(service.Volumes, dataRoot)
-		}
-
-		if useDynamicWebUIPort {
-			// If the expose port has been set dynamically, we need to update the port to expose
-			servicesCopy[i].Expose = convertPortsToExpose(service.Ports)
-			servicesCopy[i].Ports = nil
 		}
 
 		// Add user rights management
@@ -276,18 +255,25 @@ func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, useDyn
 				zap.String("user", userString))
 		}
 
-		if refNet != "" {
-			networksCopy := make(types.Networks)
-			networksCopy[refNet] = types.NetworkConfig{
-				Name:     refNet,
-				External: types.External{External: true},
-			}
-			compose.Networks = networksCopy
+		// If NetworkMode is set, skip network-related operations
+		if service.NetworkMode != "bridge" && service.NetworkMode != "" {
+			logger.Info("PCS: NetworkMode is set, skipping network configuration",
+				zap.String("service", service.Name),
+				zap.String("network_mode", service.NetworkMode))
+		} else {
+			if refNet != "" {
+				networksCopy := make(types.Networks)
+				networksCopy[refNet] = types.NetworkConfig{
+					Name:     refNet,
+					External: types.External{External: true},
+				}
+				compose.Networks = networksCopy
 
-			servicesCopy[i].Hostname = compose.Name
-			servicesCopy[i].NetworkMode = ""
-			servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
-				refNet: {},
+				servicesCopy[i].Hostname = compose.Name
+				servicesCopy[i].NetworkMode = ""
+				servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
+					refNet: {},
+				}
 			}
 		}
 	}
