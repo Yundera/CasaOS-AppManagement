@@ -396,17 +396,9 @@ func (a *ComposeApp) UpWithCheckRequire(ctx context.Context, service api.Service
 
 		}
 
-		// check if each required device exists
-		deviceMapFiltered := []string{}
-		for _, deviceMap := range app.Devices {
-			devicePath := strings.SplitN(deviceMap, ":", 2)[0]
-			if file.CheckNotExist(devicePath) {
-				logger.Info("device not found", zap.String("device", devicePath))
-				continue
-			}
-			deviceMapFiltered = append(deviceMapFiltered, deviceMap)
-		}
-		a.Services[i].Devices = deviceMapFiltered
+		// Allow all devices - no filtering based on existence
+		// Docker will handle device availability at runtime
+		a.Services[i].Devices = app.Devices
 	}
 
 	if err := a.Up(ctx, service); err != nil {
@@ -509,17 +501,9 @@ func (a *ComposeApp) PullAndInstall(ctx context.Context) error {
 
 				}
 
-			// check if each required device exists
-			deviceMapFiltered := []string{}
-			for _, deviceMap := range app.Devices {
-				devicePath := strings.SplitN(deviceMap, ":", 2)[0]
-				if file.CheckNotExist(devicePath) {
-					logger.Info("device not found", zap.String("device", devicePath))
-					continue
-				}
-				deviceMapFiltered = append(deviceMapFiltered, deviceMap)
-			}
-			a.Services[i].Devices = deviceMapFiltered
+			// Allow all devices - no filtering based on existence
+			// Docker will handle device availability at runtime
+			a.Services[i].Devices = app.Devices
 		}
 
 		if err := a.Create(ctx, api.CreateOptions{}, service); err != nil {

@@ -58,20 +58,16 @@ func filterVolumes(volumes []types.ServiceVolumeConfig, dataRoot string) []types
 		return []types.ServiceVolumeConfig{}
 	}
 
-	// Count matching volumes first to allocate correct capacity
-	matchCount := 0
-	for _, volume := range volumes {
-		if strings.HasPrefix(volume.Source, "/DATA") {
-			matchCount++
-		}
-	}
-
-	filtered := make([]types.ServiceVolumeConfig, 0, matchCount)
+	// Allow all volumes - only transform /DATA paths to dataRoot, preserve everything else
+	filtered := make([]types.ServiceVolumeConfig, 0, len(volumes))
 	for _, volume := range volumes {
 		if strings.HasPrefix(volume.Source, "/DATA") {
 			volumeCopy := volume
 			volumeCopy.Source = strings.Replace(volume.Source, "/DATA", dataRoot, -1)
 			filtered = append(filtered, volumeCopy)
+		} else {
+			// Preserve all other volumes as-is (including /dev, /proc, /sys, etc.)
+			filtered = append(filtered, volume)
 		}
 	}
 	return filtered
