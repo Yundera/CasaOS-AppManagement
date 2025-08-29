@@ -236,8 +236,37 @@ func determineWebUIPort(extCopy map[string]interface{}, compose *codegen.Compose
 	return webuiExposePort
 }
 
+func getMainServiceName(compose *codegen.ComposeApp) string {
+	casaosExt, ok := compose.Extensions["x-casaos"]
+	if !ok {
+		return ""
+	}
+
+	casaosExtensions, ok := casaosExt.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	mainService, exists := casaosExtensions["main"]
+	if !exists {
+		return ""
+	}
+
+	mainServiceName, ok := mainService.(string)
+	if !ok {
+		return ""
+	}
+
+	return mainServiceName
+}
+
 func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, puid, pgid string) {
 	servicesCopy := make([]types.ServiceConfig, len(compose.Services))
+	mainServiceName := getMainServiceName(compose)
+
+	logger.Info("PCS: identified main service for refNet configuration",
+		zap.String("mainService", mainServiceName),
+		zap.String("refNet", refNet))
 
 	for i, service := range compose.Services {
 		servicesCopy[i] = service // Shallow copy of service
@@ -261,19 +290,46 @@ func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, puid, 
 				zap.String("service", service.Name),
 				zap.String("network_mode", service.NetworkMode))
 		} else {
-			if refNet != "" {
-				networksCopy := make(types.Networks)
-				networksCopy[refNet] = types.NetworkConfig{
+			// Only apply refNet to the main service
+			if refNet != "" && mainServiceName != "" && service.Name == mainServiceName {
+				// Add refNet to compose networks (preserve existing networks)
+				if compose.Networks == nil {
+					compose.Networks = make(types.Networks)
+				}
+				compose.Networks[refNet] = types.NetworkConfig{
 					Name:     refNet,
 					External: types.External{External: true},
 				}
-				compose.Networks = networksCopy
 
-				servicesCopy[i].Hostname = compose.Name
-				servicesCopy[i].NetworkMode = ""
-				servicesCopy[i].Networks = map[string]*types.ServiceNetworkConfig{
-					refNet: {},
+				// Add refNet to service networks (preserve existing networks)
+				if servicesCopy[i].Networks == nil {
+					servicesCopy[i].Networks = make(map[string]*types.ServiceNetworkConfig)
 				}
+				servicesCopy[i].Networks[refNet] = &types.ServiceNetworkConfig{}
+				
+				// Remove network_mode when networks are defined to avoid Docker Compose validation error
+				// "service declares mutually exclusive `network_mode` and `networks`: invalid compose project"
+				if servicesCopy[i].NetworkMode != "" {
+					logger.Info("PCS: removing network_mode from main service to avoid conflict with networks",
+						zap.String("service", service.Name),
+						zap.String("removed_network_mode", servicesCopy[i].NetworkMode))
+					servicesCopy[i].NetworkMode = ""
+				}
+				
+				// Only set hostname if not already set
+				if servicesCopy[i].Hostname == "" {
+					servicesCopy[i].Hostname = compose.Name
+				}
+				
+				logger.Info("PCS: added refNet to main service (preserving existing networks)",
+					zap.String("service", service.Name),
+					zap.String("refNet", refNet),
+					zap.Any("existingNetworks", servicesCopy[i].Networks))
+			} else if refNet != "" && service.Name != mainServiceName {
+				logger.Info("PCS: skipping refNet for non-main service",
+					zap.String("service", service.Name),
+					zap.String("mainService", mainServiceName),
+					zap.String("refNet", refNet))
 			}
 		}
 	}
