@@ -269,6 +269,8 @@ func (a *AppManagement) ApplyComposeAppSettings(ctx echo.Context, id codegen.Com
 		})
 	}
 
+	executePostInstallScript((*codegen.ComposeApp)(composeApp))
+
 	return ctx.JSON(http.StatusOK, codegen.ComposeAppUpdateSettingsOK{
 		Message: utils.Ptr("compose app is being applied with changes asynchroniously"),
 	})

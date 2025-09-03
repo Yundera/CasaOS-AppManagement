@@ -3,10 +3,10 @@ package v2
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/install_cmd"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	"github.com/compose-spec/compose-go/types"
 	"go.uber.org/zap"
@@ -338,79 +338,9 @@ func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, puid, 
 }
 
 func executePreInstallScript(composeApp *codegen.ComposeApp) error {
-	if composeApp == nil {
-		logger.Error("PCS: cannot execute pre-install script - nil compose app")
-		return fmt.Errorf("nil compose app")
-	}
+	return install_cmd.ExecutePreInstallScript(composeApp)
+}
 
-	// Check if x-casaos extension exists
-	casaosExt, ok := composeApp.Extensions["x-casaos"]
-	if !ok {
-		logger.Info("PCS: no x-casaos extension found, skipping pre-install script check")
-		return nil
-	}
-
-	// Check if it's a map
-	casaosExtensions, ok := casaosExt.(map[string]interface{})
-	if !ok {
-		logger.Error("PCS: invalid x-casaos extension format",
-			zap.String("name", composeApp.Name),
-			zap.Any("extensions", casaosExt))
-		return fmt.Errorf("invalid x-casaos extension format")
-	}
-
-	// Check for pre-install-cmd
-	preInstallCmd, exists := casaosExtensions["pre-install-cmd"]
-	if !exists || preInstallCmd == nil {
-		logger.Info("PCS: no pre-install-cmd found in x-casaos extension",
-			zap.String("name", composeApp.Name))
-		return nil
-	}
-
-	// Get the command value as string
-	cmdString, ok := preInstallCmd.(string)
-	if !ok || cmdString == "" {
-		logger.Error("PCS: invalid pre-install-cmd value",
-			zap.String("name", composeApp.Name),
-			zap.Any("command", preInstallCmd))
-		return fmt.Errorf("invalid pre-install-cmd value")
-	}
-
-	logger.Info("PCS: executing pre-install command",
-		zap.String("name", composeApp.Name),
-		zap.String("command", cmdString))
-
-	// Create a more robust command execution
-	execCmd := exec.Command("/bin/bash", "-c", cmdString)
-
-	// Set environment variables that might be needed for Docker
-	execCmd.Env = append(os.Environ(),
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"DOCKER_HOST=unix:///var/run/docker.sock")
-
-	// Ensure the command has access to standard streams
-	execCmd.Stdin = os.Stdin
-	execCmd.Stdout = os.Stdout
-	execCmd.Stderr = os.Stderr
-
-	// Log command for debugging
-	logger.Info("PCS: running command",
-		zap.String("command", cmdString),
-		zap.Strings("env", execCmd.Env))
-
-	// Run the command interactively
-	err := execCmd.Run()
-	if err != nil {
-		logger.Error("PCS: failed to execute pre-install command",
-			zap.String("name", composeApp.Name),
-			zap.String("command", cmdString),
-			zap.Error(err))
-		return fmt.Errorf("pre-install command execution failed: %w", err)
-	}
-
-	logger.Info("PCS: pre-install command executed successfully",
-		zap.String("name", composeApp.Name),
-		zap.String("command", cmdString))
-
-	return nil
+func executePostInstallScript(composeApp *codegen.ComposeApp) error {
+	return install_cmd.ExecutePostInstallScript(composeApp)
 }

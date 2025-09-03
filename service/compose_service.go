@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/install_cmd"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/file"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	timeutils "github.com/IceWhaleTech/CasaOS-Common/utils/time"
@@ -105,6 +107,12 @@ func (s *ComposeService) Install(ctx context.Context, composeApp *ComposeApp) er
 			})
 
 			logger.Error("failed to install compose app", zap.Error(err), zap.String("name", composeApp.Name))
+		} else {
+			// Execute post-install command after successful installation
+			if err := install_cmd.ExecutePostInstallScript((*codegen.ComposeApp)(composeApp)); err != nil {
+				logger.Error("failed to execute post-install command, but installation was successful", zap.Error(err), zap.String("name", composeApp.Name))
+				// Don't fail the installation if post-install command fails
+			}
 		}
 	}(ctx)
 
