@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
@@ -53,10 +56,14 @@ func (s *ComposeService) Install(ctx context.Context, composeApp *ComposeApp) er
 
 	logger.Info("installing compose app", zap.String("name", composeApp.Name))
 
-	composeYAMLInterpolated, err := yaml.Marshal(composeApp)
+	// Marshal to YAML first
+	composeYAML, err := yaml.Marshal(composeApp)
 	if err != nil {
 		return err
 	}
+
+	// Interpolate AUTH_HASH and other variables in the YAML string
+	composeYAMLInterpolated := s.interpolateInstallTimeVariables(string(composeYAML), composeApp.Name)
 
 	workingDirectory, err := s.PrepareWorkingDirectory(composeApp.Name)
 	if err != nil {
@@ -65,7 +72,7 @@ func (s *ComposeService) Install(ctx context.Context, composeApp *ComposeApp) er
 
 	yamlFilePath := filepath.Join(workingDirectory, common.ComposeYAMLFileName)
 
-	if err := os.WriteFile(yamlFilePath, composeYAMLInterpolated, 0o600); err != nil {
+	if err := os.WriteFile(yamlFilePath, []byte(composeYAMLInterpolated), 0o600); err != nil {
 		logger.Error("failed to save compose file", zap.Error(err), zap.String("path", yamlFilePath))
 
 		if err := file.RMDir(workingDirectory); err != nil {
@@ -203,6 +210,56 @@ func NewComposeService() *ComposeService {
 	return &ComposeService{
 		installationInProgress: sync.Map{},
 	}
+}
+
+// generateAuthHash generates a secure 128-character random string for AUTH_HASH
+func generateAuthHash() string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	const length = 128
+	
+	b := make([]byte, length)
+	_, err := rand.Read(b)
+	if err != nil {
+		// Fallback to a basic implementation if crypto/rand fails
+		// Generate a 128-character fallback string
+		fallback := "casaos_fallback_auth_hash_"
+		for len(fallback) < 128 {
+			fallback += "0123456789abcdef"
+		}
+		return fallback[:128]
+	}
+	
+	for i := range b {
+		b[i] = chars[b[i]%byte(len(chars))]
+	}
+	return string(b)
+}
+
+// interpolateInstallTimeVariables replaces installation-time variables with their actual values
+// This ensures that AUTH_HASH is persisted with its generated value
+// This works on the YAML string to ensure ALL occurrences are replaced, not just in environment variables
+func (s *ComposeService) interpolateInstallTimeVariables(yamlContent string, appName string) string {
+	// Generate a single AUTH_HASH for this installation
+	authHash := generateAuthHash()
+	logger.Info("Generated AUTH_HASH for installation", zap.String("app", appName), zap.String("hash_length", fmt.Sprintf("%d", len(authHash))))
+	
+	// Only replace AUTH_HASH - other variables continue to work through baseInterpolationMap
+	result := yamlContent
+	
+	// Count replacements for logging
+	count := strings.Count(result, "$AUTH_HASH")
+	if count > 0 {
+		logger.Info("Replacing AUTH_HASH throughout compose file", 
+			zap.String("app", appName),
+			zap.Int("occurrences", count))
+	}
+	
+	// Replace all occurrences of AUTH_HASH
+	result = strings.ReplaceAll(result, "$AUTH_HASH", authHash)
+	
+	logger.Info("Completed AUTH_HASH interpolation", zap.String("app", appName), zap.Int("replacements", count))
+	
+	return result
 }
 
 func baseInterpolationMap() map[string]string {
