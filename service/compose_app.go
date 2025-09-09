@@ -568,7 +568,7 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 
 	if err := service.Down(ctx, a.Name, api.DownOptions{
 		RemoveOrphans: true,
-		Images:        "all",
+		Images:        "",
 		Volumes:       true,
 	}); err != nil {
 		go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
