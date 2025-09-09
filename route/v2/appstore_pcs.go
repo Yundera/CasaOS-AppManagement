@@ -3,6 +3,7 @@ package v2
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
@@ -338,6 +339,47 @@ func modifyServices(compose *codegen.ComposeApp, dataRoot, refNet string, puid, 
 }
 
 func executePreInstallScript(composeApp *codegen.ComposeApp) error {
+	// First, ensure AppData folders are created with proper ownership
+	if composeApp != nil && composeApp.Name != "" {
+		dataRoot := getEnvWithDefault("DATA_ROOT", "/DATA")
+		puid := getEnvWithDefault("PUID", "1000")
+		pgid := getEnvWithDefault("PGID", "1000")
+
+		// Folders to create
+		folders := []string{
+			filepath.Join(dataRoot, "AppData", composeApp.Name),
+			filepath.Join(dataRoot, "AppData", "casaos", "apps", composeApp.Name),
+		}
+
+		// Convert PUID/PGID to integers once
+		uid, uidErr := strconv.Atoi(puid)
+		gid, gidErr := strconv.Atoi(pgid)
+
+		for _, folder := range folders {
+			// Create the directory
+			if err := os.MkdirAll(folder, 0755); err != nil {
+				logger.Error("PCS: failed to create AppData folder",
+					zap.String("folder", folder),
+					zap.Error(err))
+			} else {
+				// Set ownership if PUID/PGID are valid
+				if uidErr == nil && gidErr == nil {
+					if err := os.Chown(folder, uid, gid); err != nil {
+						logger.Error("PCS: failed to set ownership for AppData folder",
+							zap.String("folder", folder),
+							zap.Error(err))
+					} else {
+						logger.Info("PCS: created AppData folder",
+							zap.String("folder", folder),
+							zap.String("puid", puid),
+							zap.String("pgid", pgid))
+					}
+				}
+			}
+		}
+	}
+
+	// Then execute any pre-install commands
 	return install_cmd.ExecutePreInstallScript(composeApp)
 }
 
