@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +9,7 @@ import (
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/auth"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/install_cmd"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/file"
@@ -212,36 +211,14 @@ func NewComposeService() *ComposeService {
 	}
 }
 
-// generateAuthHash generates a secure 128-character random string for AUTH_HASH
-func generateAuthHash() string {
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	const length = 128
-	
-	b := make([]byte, length)
-	_, err := rand.Read(b)
-	if err != nil {
-		// Fallback to a basic implementation if crypto/rand fails
-		// Generate a 128-character fallback string
-		fallback := "casaos_fallback_auth_hash_"
-		for len(fallback) < 128 {
-			fallback += "0123456789abcdef"
-		}
-		return fallback[:128]
-	}
-	
-	for i := range b {
-		b[i] = chars[b[i]%byte(len(chars))]
-	}
-	return string(b)
-}
 
 // interpolateInstallTimeVariables replaces installation-time variables with their actual values
 // This ensures that AUTH_HASH is persisted with its generated value
 // This works on the YAML string to ensure ALL occurrences are replaced, not just in environment variables
 func (s *ComposeService) interpolateInstallTimeVariables(yamlContent string, appName string) string {
 	// Generate a single AUTH_HASH for this installation
-	authHash := generateAuthHash()
-	logger.Info("Generated AUTH_HASH for installation", zap.String("app", appName), zap.String("hash_length", fmt.Sprintf("%d", len(authHash))))
+	authHash := auth.GenerateHash()
+	logger.Info("Generated AUTH_HASH for installation", zap.String("app", appName), zap.Int("hash_length", len(authHash)))
 	
 	// Only replace AUTH_HASH - other variables continue to work through baseInterpolationMap
 	result := yamlContent
