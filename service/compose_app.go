@@ -499,6 +499,12 @@ func (a *ComposeApp) PullAndInstall(ctx context.Context) error {
 					continue
 				}
 
+				// Create directory and set ownership if conditions are met
+				if err := PrepareVolumeDirectory(volume.Source); err != nil {
+					logger.Error("failed to prepare volume directory", zap.Error(err), zap.String("path", volume.Source))
+					// Don't fail installation, just log the error
+				}
+
 				}
 
 			// Allow all devices - no filtering based on existence
