@@ -91,7 +91,26 @@ func InitSetup(config string, sample string) {
 func SaveSetup() error {
 	reflectFrom("common", CommonInfo)
 	reflectFrom("app", AppInfo)
-	reflectFrom("server", ServerInfo)
+	
+	// Handle ServerInfo.AppStoreList manually to properly write as shadow entries
+	// The ini library's ReflectFrom doesn't handle arrays with allowshadow correctly,
+	// so we need to manually create multiple "appstore" keys for persistence
+	serverSection := Cfg.Section("server")
+	
+	// First, remove all existing appstore keys
+	for _, key := range serverSection.Keys() {
+		if key.Name() == "appstore" {
+			serverSection.DeleteKey(key.Name())
+		}
+	}
+	
+	// Then add each app store URL as a separate shadow key
+	for _, appStoreURL := range ServerInfo.AppStoreList {
+		_, err := serverSection.NewKey("appstore", appStoreURL)
+		if err != nil {
+			return err
+		}
+	}
 
 	return Cfg.SaveTo(ConfigFilePath)
 }
