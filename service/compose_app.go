@@ -949,10 +949,26 @@ func NewComposeAppFromYAML(yaml []byte, skipInterpolation, skipValidation bool) 
 			WorkingDir: tmpWorkingDir,
 		},
 		func(o *loader.Options) {
-			o.SkipInterpolation = true
+			o.SkipInterpolation = skipInterpolation
 			o.SkipValidation = skipValidation
 
 			o.Interpolate.LookupValue = func(key string) (string, bool) {
+				// Check if this is a baseInterpolationMap variable
+				// These should NOT be interpolated here (they're handled later in LoadComposeAppFromConfigFile)
+				for k := range baseInterpolationMap() {
+					if k == key {
+						return fmt.Sprintf("$%s", key), true
+					}
+				}
+
+				// For all other variables, look up from OS environment
+				// This allows DATA_ROOT and other PCS variables to work at the appstore level
+				value, ok := os.LookupEnv(key)
+				if ok {
+					return value, true
+				}
+
+				// Variable not found, keep as $VAR
 				return fmt.Sprintf("$%s", key), true
 			}
 

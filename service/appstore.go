@@ -390,7 +390,7 @@ func BuildCatalog(storeRoot string) (map[string]*ComposeApp, error) {
 			return nil
 		}
 
-		composeApp, err := NewComposeAppFromYAML(composeYAML, true, false)
+		composeApp, err := NewComposeAppFromYAML(composeYAML, false, false)
 		if err != nil {
 			logger.Info("failed to parse compose app - contact the contributor of this app to fix it", zap.Error(err), zap.String("composeFile", composeFile))
 			return fs.SkipDir // skip invalid compose app
