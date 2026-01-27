@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	alpineImage   = "alpine:latest"
-	rootOpTimeout = 30 * time.Second
+	alpineImage      = "alpine:latest"
+	rootOpTimeout    = 30 * time.Second
+	archiveOpTimeout = 120 * time.Second
 )
 
 // resolveHostPath translates a container-internal path to the corresponding
@@ -41,6 +42,135 @@ func resolveHostPath(ctx context.Context, cli *client.Client, containerPath stri
 	}
 
 	return containerPath
+}
+
+// ensureAlpineImage pulls the alpine image if it's not already available.
+func ensureAlpineImage(ctx context.Context, cli *client.Client) error {
+	_, _, err := cli.ImageInspectWithRaw(ctx, alpineImage)
+	if err != nil {
+		pullReader, pullErr := cli.ImagePull(ctx, alpineImage, types.ImagePullOptions{})
+		if pullErr != nil {
+			return fmt.Errorf("failed to pull alpine image: %w", pullErr)
+		}
+		defer pullReader.Close()
+		io.Copy(io.Discard, pullReader)
+	}
+	return nil
+}
+
+// runContainerAndWait creates a container, starts it, waits for completion,
+// and cleans it up. Returns an error if the container fails.
+func runContainerAndWait(ctx context.Context, cli *client.Client, config *container.Config, hostConfig *container.HostConfig) error {
+	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("failed to create container: %w", err)
+	}
+
+	defer func() {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer removeCancel()
+		cli.ContainerRemove(removeCtx, resp.ID, types.ContainerRemoveOptions{Force: true})
+	}()
+
+	if err := cli.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
+		return fmt.Errorf("failed to start container: %w", err)
+	}
+
+	statusCh, errCh := cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("error waiting for container: %w", err)
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			return fmt.Errorf("container exited with status %d", status.StatusCode)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("timeout waiting for container")
+	}
+
+	return nil
+}
+
+// ArchivePathAsRoot creates a zip archive of the given directory using a Docker
+// container running as root, then sets the archive ownership to the specified
+// uid:gid so non-root users can manage it. The archive is saved to archiveDir.
+func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string, archiveName string) error {
+	if sourcePath == "" {
+		return fmt.Errorf("source path cannot be empty")
+	}
+
+	absSource, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve source path: %w", err)
+	}
+
+	if _, err := os.Stat(absSource); os.IsNotExist(err) {
+		return nil
+	}
+
+	absArchiveDir, err := filepath.Abs(archiveDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve archive dir: %w", err)
+	}
+
+	// Create archive directory if it doesn't exist
+	if err := os.MkdirAll(absArchiveDir, 0755); err != nil {
+		return fmt.Errorf("failed to create archive directory: %w", err)
+	}
+
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("failed to create docker client: %w", err)
+	}
+	defer cli.Close()
+
+	opCtx, cancel := context.WithTimeout(ctx, archiveOpTimeout)
+	defer cancel()
+
+	hostSourcePath := resolveHostPath(opCtx, cli, absSource)
+	hostArchiveDir := resolveHostPath(opCtx, cli, absArchiveDir)
+
+	if err := ensureAlpineImage(opCtx, cli); err != nil {
+		return err
+	}
+
+	// Get PUID/PGID from environment
+	puid := os.Getenv("PUID")
+	if puid == "" {
+		puid = "1000"
+	}
+	pgid := os.Getenv("PGID")
+	if pgid == "" {
+		pgid = "1000"
+	}
+
+	// Create archive using Alpine container with zip
+	cmd := fmt.Sprintf(
+		"apk add --no-cache zip > /dev/null 2>&1 && "+
+			"cd /source && zip -r /archive/%s . > /dev/null 2>&1 && "+
+			"chown %s:%s /archive/%s",
+		archiveName, puid, pgid, archiveName,
+	)
+
+	err = runContainerAndWait(opCtx, cli,
+		&container.Config{
+			Image: alpineImage,
+			Cmd:   []string{"sh", "-c", cmd},
+		},
+		&container.HostConfig{
+			Binds: []string{
+				hostSourcePath + ":/source:ro",
+				hostArchiveDir + ":/archive",
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to archive path: %w", err)
+	}
+
+	return nil
 }
 
 // RemovePathAsRoot removes a directory and all its contents using a Docker
@@ -74,21 +204,14 @@ func RemovePathAsRoot(ctx context.Context, path string) error {
 	// Translate container-internal path to host path
 	hostPath := resolveHostPath(opCtx, cli, absPath)
 
-	// Ensure alpine image is available
-	_, _, err = cli.ImageInspectWithRaw(opCtx, alpineImage)
-	if err != nil {
-		pullReader, pullErr := cli.ImagePull(opCtx, alpineImage, types.ImagePullOptions{})
-		if pullErr != nil {
-			return fmt.Errorf("failed to pull alpine image: %w", pullErr)
-		}
-		defer pullReader.Close()
-		io.Copy(io.Discard, pullReader) // Wait for pull to complete
+	if err := ensureAlpineImage(opCtx, cli); err != nil {
+		return err
 	}
 
-	// Create container that deletes the contents of the mounted path.
+	// Delete the contents of the mounted path using an Alpine container.
 	// We delete /target/* and /target/.* (hidden files) but not /target itself
 	// because /target is the mount point and cannot be removed from inside.
-	resp, err := cli.ContainerCreate(opCtx,
+	err = runContainerAndWait(opCtx, cli,
 		&container.Config{
 			Image: alpineImage,
 			Cmd:   []string{"sh", "-c", "rm -rf /target/* /target/.* 2>/dev/null; exit 0"},
@@ -96,36 +219,9 @@ func RemovePathAsRoot(ctx context.Context, path string) error {
 		&container.HostConfig{
 			Binds: []string{hostPath + ":/target"},
 		},
-		nil, nil, "",
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Always clean up the container
-	defer func() {
-		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer removeCancel()
-		cli.ContainerRemove(removeCtx, resp.ID, types.ContainerRemoveOptions{Force: true})
-	}()
-
-	// Start and wait for the container
-	if err := cli.ContainerStart(opCtx, resp.ID, types.ContainerStartOptions{}); err != nil {
-		return fmt.Errorf("failed to start container: %w", err)
-	}
-
-	statusCh, errCh := cli.ContainerWait(opCtx, resp.ID, container.WaitConditionNotRunning)
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("error waiting for container: %w", err)
-		}
-	case status := <-statusCh:
-		if status.StatusCode != 0 {
-			return fmt.Errorf("container exited with status %d", status.StatusCode)
-		}
-	case <-opCtx.Done():
-		return fmt.Errorf("timeout waiting for container")
+		return fmt.Errorf("failed to remove path contents: %w", err)
 	}
 
 	// Now remove the empty directory from the host
