@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -17,6 +18,30 @@ const (
 	alpineImage   = "alpine:latest"
 	rootOpTimeout = 30 * time.Second
 )
+
+// resolveHostPath translates a container-internal path to the corresponding
+// host path by inspecting our own container's mount points. This is needed
+// when CasaOS runs inside a Docker container — the Alpine cleanup container
+// is created via the host Docker daemon so it needs host paths.
+func resolveHostPath(ctx context.Context, cli *client.Client, containerPath string) string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return containerPath
+	}
+
+	info, err := cli.ContainerInspect(ctx, hostname)
+	if err != nil {
+		return containerPath
+	}
+
+	for _, mount := range info.Mounts {
+		if strings.HasPrefix(containerPath, mount.Destination) {
+			return mount.Source + containerPath[len(mount.Destination):]
+		}
+	}
+
+	return containerPath
+}
 
 // RemovePathAsRoot removes a directory and all its contents using a Docker
 // container running as root. This solves the problem where volume folders
@@ -46,6 +71,9 @@ func RemovePathAsRoot(ctx context.Context, path string) error {
 	opCtx, cancel := context.WithTimeout(ctx, rootOpTimeout)
 	defer cancel()
 
+	// Translate container-internal path to host path
+	hostPath := resolveHostPath(opCtx, cli, absPath)
+
 	// Ensure alpine image is available
 	_, _, err = cli.ImageInspectWithRaw(opCtx, alpineImage)
 	if err != nil {
@@ -66,7 +94,7 @@ func RemovePathAsRoot(ctx context.Context, path string) error {
 			Cmd:   []string{"sh", "-c", "rm -rf /target/* /target/.* 2>/dev/null; exit 0"},
 		},
 		&container.HostConfig{
-			Binds: []string{absPath + ":/target"},
+			Binds: []string{hostPath + ":/target"},
 		},
 		nil, nil, "",
 	)
