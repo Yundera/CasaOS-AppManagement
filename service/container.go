@@ -22,7 +22,7 @@ import (
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/docker"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/utils/envHelper"
 	v1 "github.com/IceWhaleTech/CasaOS-AppManagement/service/v1"
-	"github.com/IceWhaleTech/CasaOS-Common/utils/file"
+
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/random"
 	timeutils "github.com/IceWhaleTech/CasaOS-Common/utils/time"
@@ -756,13 +756,8 @@ func (ds *dockerService) RemoveContainer(name string, update bool) error {
 	}
 
 	// 路径处理
-	if path := docker.GetDir(name, "/config"); !file.CheckNotExist(path) {
-		if err := file.RMDir(path); err != nil {
-			logger.Info("normal removal failed, trying with root privileges", zap.String("path", path), zap.Error(err))
-			if err := docker.RemovePathAsRoot(context.Background(), path); err != nil {
-				return err
-			}
-		}
+	if err := docker.RemovePathAsRoot(context.Background(), docker.GetDir(name, "/config")); err != nil {
+		return err
 	}
 
 	return nil
