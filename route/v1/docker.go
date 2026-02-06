@@ -750,11 +750,8 @@ func uninstall(ctx context.Context, container *types.ContainerJSON, isDelete boo
 		for _, v := range container.Mounts {
 			if strings.Contains(v.Source, container.Name) {
 				path := filepath.Join(strings.Split(v.Source, container.Name)[0], container.Name)
-				if err := file.RMDir(path); err != nil {
-					logger.Info("normal removal failed, trying with root privileges", zap.String("path", path), zap.Error(err))
-					if err := docker.RemovePathAsRoot(ctx, path); err != nil {
-						return err
-					}
+				if err := docker.RemovePathAsRoot(ctx, path); err != nil {
+					return err
 				}
 			}
 		}
