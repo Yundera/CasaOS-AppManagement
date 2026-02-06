@@ -3,121 +3,130 @@ package docker
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"go.uber.org/zap"
 )
 
 const (
-	alpineImage      = "alpine:latest"
 	rootOpTimeout    = 30 * time.Second
 	archiveOpTimeout = 120 * time.Second
+	maxArchives      = 10
 )
 
-// resolveHostPath translates a container-internal path to the corresponding
-// host path by inspecting our own container's mount points. This is needed
-// when CasaOS runs inside a Docker container — the Alpine cleanup container
-// is created via the host Docker daemon so it needs host paths.
-func resolveHostPath(ctx context.Context, cli *client.Client, containerPath string) string {
+var allowedPathPrefixes = []string{
+	"/DATA/",
+	"/data/",
+}
+
+var safeShellChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+func sanitizeShellArg(s string) string {
+	return safeShellChars.ReplaceAllString(s, "_")
+}
+
+func validatePath(absPath string) error {
+	cleaned := filepath.Clean(absPath)
+	for _, prefix := range allowedPathPrefixes {
+		if strings.HasPrefix(cleaned, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("path %q is outside allowed directories", absPath)
+}
+
+// resolveContainerPath translates a path (which may originate from a compose
+// volume source or host-perspective path) to the corresponding container-internal
+// path by inspecting our own container's mount points. This is the reverse of
+// the host-path resolution — needed because docker exec runs inside our container.
+func resolveContainerPath(ctx context.Context, cli *client.Client, path string) string {
+	// If path already starts with a known mount destination, return as-is
 	hostname, err := os.Hostname()
 	if err != nil {
-		return containerPath
+		return path
 	}
 
 	info, err := cli.ContainerInspect(ctx, hostname)
 	if err != nil {
-		return containerPath
+		return path
 	}
 
+	// Check if path already matches a mount destination
 	for _, mount := range info.Mounts {
-		if strings.HasPrefix(containerPath, mount.Destination) {
-			return mount.Source + containerPath[len(mount.Destination):]
+		if strings.HasPrefix(path, mount.Destination+"/") || path == mount.Destination {
+			return path
 		}
 	}
 
-	return containerPath
-}
-
-// ensureAlpineImage pulls the alpine image if it's not already available.
-func ensureAlpineImage(ctx context.Context, cli *client.Client) error {
-	_, _, err := cli.ImageInspectWithRaw(ctx, alpineImage)
-	if err != nil {
-		pullReader, pullErr := cli.ImagePull(ctx, alpineImage, types.ImagePullOptions{})
-		if pullErr != nil {
-			return fmt.Errorf("failed to pull alpine image: %w", pullErr)
+	// Path doesn't match any mount destination directly.
+	// Find the mount whose Destination appears within the path and remap.
+	// e.g., path="/c/DATA/AppData/foo" with mount Destination="/DATA"
+	// → found at index 2 → return "/DATA/AppData/foo"
+	for _, mount := range info.Mounts {
+		idx := strings.Index(path, mount.Destination+"/")
+		if idx > 0 {
+			return path[idx:]
 		}
-		defer pullReader.Close()
-		io.Copy(io.Discard, pullReader)
 	}
-	return nil
+
+	return path
 }
 
-// runContainerAndWait creates a container, starts it, waits for completion,
-// and cleans it up. Returns an error if the container fails.
-func runContainerAndWait(ctx context.Context, cli *client.Client, config *container.Config, hostConfig *container.HostConfig) error {
-	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, "")
+// execAsRoot runs a command as root inside the CasaOS container itself
+// via docker exec. The CasaOS container runs s6-overlay as root,
+// so exec with User:"root" works.
+func execAsRoot(ctx context.Context, cli *client.Client, cmd []string) error {
+	hostname, err := os.Hostname()
 	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
+		return fmt.Errorf("failed to get hostname: %w", err)
 	}
 
-	defer func() {
-		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer removeCancel()
-		cli.ContainerRemove(removeCtx, resp.ID, types.ContainerRemoveOptions{Force: true})
-	}()
-
-	if err := cli.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
-		return fmt.Errorf("failed to start container: %w", err)
+	ir, err := cli.ContainerExecCreate(ctx, hostname, types.ExecConfig{
+		Cmd:  cmd,
+		User: "root",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create exec: %w", err)
 	}
 
-	statusCh, errCh := cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
-	select {
-	case err := <-errCh:
+	if err := cli.ContainerExecStart(ctx, ir.ID, types.ExecStartCheck{Detach: true}); err != nil {
+		return fmt.Errorf("failed to start exec: %w", err)
+	}
+
+	for {
+		inspect, err := cli.ContainerExecInspect(ctx, ir.ID)
 		if err != nil {
-			return fmt.Errorf("error waiting for container: %w", err)
+			return fmt.Errorf("failed to inspect exec: %w", err)
 		}
-	case status := <-statusCh:
-		if status.StatusCode != 0 {
-			return fmt.Errorf("container exited with status %d", status.StatusCode)
+		if !inspect.Running {
+			if inspect.ExitCode != 0 {
+				return fmt.Errorf("command exited with status %d", inspect.ExitCode)
+			}
+			return nil
 		}
-	case <-ctx.Done():
-		return fmt.Errorf("timeout waiting for container")
-	}
 
-	return nil
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for exec to complete")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
-// ArchivePathAsRoot creates a zip archive of the given directory using a Docker
-// container running as root, then sets the archive ownership to the specified
-// uid:gid so non-root users can manage it. The archive is saved to archiveDir.
+// ArchivePathAsRoot creates a zip archive of the given directory by running
+// zip as root inside the CasaOS container. The archive is saved to archiveDir
+// and ownership is set to PUID:PGID so non-root users can manage it.
 func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string, archiveName string) error {
 	if sourcePath == "" {
 		return fmt.Errorf("source path cannot be empty")
-	}
-
-	absSource, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve source path: %w", err)
-	}
-
-	if _, err := os.Stat(absSource); os.IsNotExist(err) {
-		return nil
-	}
-
-	absArchiveDir, err := filepath.Abs(archiveDir)
-	if err != nil {
-		return fmt.Errorf("failed to resolve archive dir: %w", err)
-	}
-
-	// Create archive directory if it doesn't exist
-	if err := os.MkdirAll(absArchiveDir, 0755); err != nil {
-		return fmt.Errorf("failed to create archive directory: %w", err)
 	}
 
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -129,14 +138,24 @@ func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string
 	opCtx, cancel := context.WithTimeout(ctx, archiveOpTimeout)
 	defer cancel()
 
-	hostSourcePath := resolveHostPath(opCtx, cli, absSource)
-	hostArchiveDir := resolveHostPath(opCtx, cli, absArchiveDir)
+	absSource := resolveContainerPath(opCtx, cli, sourcePath)
+	absArchiveDir := resolveContainerPath(opCtx, cli, archiveDir)
 
-	if err := ensureAlpineImage(opCtx, cli); err != nil {
-		return err
+	logger.Info("ArchivePathAsRoot", zap.String("source", absSource), zap.String("archiveDir", absArchiveDir), zap.String("name", archiveName))
+
+	if err := validatePath(absSource); err != nil {
+		return fmt.Errorf("root archive refused: %w", err)
 	}
 
-	// Get PUID/PGID from environment
+	if _, err := os.Stat(absSource); os.IsNotExist(err) {
+		return nil
+	}
+
+	// Create archive directory as root
+	if err := execAsRoot(opCtx, cli, []string{"mkdir", "-p", absArchiveDir}); err != nil {
+		return fmt.Errorf("failed to create archive directory: %w", err)
+	}
+
 	puid := os.Getenv("PUID")
 	if puid == "" {
 		puid = "1000"
@@ -146,50 +165,65 @@ func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string
 		pgid = "1000"
 	}
 
-	// Create archive using Alpine container with zip
+	safeName := sanitizeShellArg(archiveName)
+	safePuid := sanitizeShellArg(puid)
+	safePgid := sanitizeShellArg(pgid)
+	archivePath := filepath.Join(absArchiveDir, safeName)
+
 	cmd := fmt.Sprintf(
-		"apk add --no-cache zip > /dev/null 2>&1 && "+
-			"cd /source && zip -r /archive/%s . > /dev/null 2>&1 && "+
-			"chown %s:%s /archive/%s",
-		archiveName, puid, pgid, archiveName,
+		"cd %s && zip -r %s . > /dev/null 2>&1 && chown %s:%s %s",
+		absSource, archivePath, safePuid, safePgid, archivePath,
 	)
 
-	err = runContainerAndWait(opCtx, cli,
-		&container.Config{
-			Image: alpineImage,
-			Cmd:   []string{"sh", "-c", cmd},
-		},
-		&container.HostConfig{
-			Binds: []string{
-				hostSourcePath + ":/source:ro",
-				hostArchiveDir + ":/archive",
-			},
-		},
-	)
-	if err != nil {
+	if err := execAsRoot(opCtx, cli, []string{"sh", "-c", cmd}); err != nil {
 		return fmt.Errorf("failed to archive path: %w", err)
 	}
+
+	pruneOldArchives(absArchiveDir, maxArchives)
 
 	return nil
 }
 
-// RemovePathAsRoot removes a directory and all its contents using a Docker
-// container running as root. This solves the problem where volume folders
-// created by containers running as root cannot be deleted by a non-root
-// CasaOS process.
+// pruneOldArchives removes the oldest zip files in dir when the count
+// exceeds maxKeep. Files are sorted by modification time (oldest first).
+func pruneOldArchives(dir string, maxKeep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	var zips []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".zip") {
+			zips = append(zips, e)
+		}
+	}
+
+	if len(zips) <= maxKeep {
+		return
+	}
+
+	sort.Slice(zips, func(i, j int) bool {
+		fi, _ := zips[i].Info()
+		fj, _ := zips[j].Info()
+		if fi == nil || fj == nil {
+			return false
+		}
+		return fi.ModTime().Before(fj.ModTime())
+	})
+
+	for _, z := range zips[:len(zips)-maxKeep] {
+		os.Remove(filepath.Join(dir, z.Name()))
+	}
+}
+
+// RemovePathAsRoot removes a directory and all its contents by running
+// rm as root inside the CasaOS container via docker exec. This solves
+// the problem where volume folders created by containers running as root
+// cannot be deleted by the non-root CasaOS process.
 func RemovePathAsRoot(ctx context.Context, path string) error {
 	if path == "" {
 		return fmt.Errorf("path cannot be empty")
-	}
-
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to resolve absolute path: %w", err)
-	}
-
-	// Check if path exists
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return nil // Already gone, nothing to do
 	}
 
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -201,32 +235,20 @@ func RemovePathAsRoot(ctx context.Context, path string) error {
 	opCtx, cancel := context.WithTimeout(ctx, rootOpTimeout)
 	defer cancel()
 
-	// Translate container-internal path to host path
-	hostPath := resolveHostPath(opCtx, cli, absPath)
+	absPath := resolveContainerPath(opCtx, cli, path)
 
-	if err := ensureAlpineImage(opCtx, cli); err != nil {
-		return err
+	logger.Info("RemovePathAsRoot", zap.String("path", absPath))
+
+	if err := validatePath(absPath); err != nil {
+		return fmt.Errorf("root removal refused: %w", err)
 	}
 
-	// Delete the contents of the mounted path using an Alpine container.
-	// We delete /target/* and /target/.* (hidden files) but not /target itself
-	// because /target is the mount point and cannot be removed from inside.
-	err = runContainerAndWait(opCtx, cli,
-		&container.Config{
-			Image: alpineImage,
-			Cmd:   []string{"sh", "-c", "rm -rf /target/* /target/.* 2>/dev/null; exit 0"},
-		},
-		&container.HostConfig{
-			Binds: []string{hostPath + ":/target"},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to remove path contents: %w", err)
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		return nil
 	}
 
-	// Now remove the empty directory from the host
-	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove empty directory: %w", err)
+	if err := execAsRoot(opCtx, cli, []string{"rm", "-rf", absPath}); err != nil {
+		return fmt.Errorf("failed to remove path: %w", err)
 	}
 
 	return nil
