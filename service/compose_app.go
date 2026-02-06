@@ -584,14 +584,11 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 		return err
 	}
 
-	if err := file.RMDir(a.WorkingDir); err != nil {
-		logger.Info("normal removal failed, trying with root privileges", zap.String("path", a.WorkingDir), zap.Error(err))
-		if err := docker.RemovePathAsRoot(ctx, a.WorkingDir); err != nil {
-			logger.Error("root removal also failed", zap.String("path", a.WorkingDir), zap.Error(err))
-			go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
-				common.PropertyTypeMessage.Name: err.Error(),
-			})
-		}
+	if err := docker.RemovePathAsRoot(ctx, a.WorkingDir); err != nil {
+		logger.Error("failed to remove working dir", zap.String("path", a.WorkingDir), zap.Error(err))
+		go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
+			common.PropertyTypeMessage.Name: err.Error(),
+		})
 	}
 
 	if !deleteConfigFolder {
@@ -636,14 +633,11 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 		for _, volume := range app.Volumes {
 			if strings.Contains(volume.Source, a.Name) {
 				path := filepath.Join(strings.Split(volume.Source, a.Name)[0], a.Name)
-				if err := file.RMDir(path); err != nil {
-					logger.Info("normal removal failed, trying with root privileges", zap.String("path", path), zap.Error(err))
-					if err := docker.RemovePathAsRoot(ctx, path); err != nil {
-						logger.Error("root removal also failed", zap.String("path", path), zap.Error(err))
-						go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
-							common.PropertyTypeMessage.Name: err.Error(),
-						})
-					}
+				if err := docker.RemovePathAsRoot(ctx, path); err != nil {
+					logger.Error("failed to remove volume path", zap.String("path", path), zap.Error(err))
+					go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
+						common.PropertyTypeMessage.Name: err.Error(),
+					})
 				}
 			}
 		}
