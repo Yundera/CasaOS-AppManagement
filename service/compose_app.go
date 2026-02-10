@@ -584,7 +584,8 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 		return err
 	}
 
-	if err := file.RMDir(a.WorkingDir); err != nil {
+	if err := docker.RemovePathAsRoot(ctx, a.WorkingDir); err != nil {
+		logger.Error("failed to remove working dir", zap.String("path", a.WorkingDir), zap.Error(err))
 		go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
 			common.PropertyTypeMessage.Name: err.Error(),
 		})
@@ -594,13 +595,46 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 		return nil
 	}
 
+	// Archive app data before deletion
+	dataRoot := os.Getenv("DATA_ROOT")
+	if dataRoot == "" {
+		dataRoot = "/DATA"
+	}
+	archiveDir := filepath.Join(dataRoot, "AppData")
+	timestamp := time.Now().Format("20060102_150405")
+	archived := make(map[string]bool)
+
 	for _, app := range a.Services {
 		for _, volume := range app.Volumes {
 			if strings.Contains(volume.Source, a.Name) {
 				path := filepath.Join(strings.Split(volume.Source, a.Name)[0], a.Name)
-				if err := file.RMDir(path); err != nil {
-					logger.Error("failed to remove compose app config folder", zap.Error(err), zap.String("path", path))
+				if archived[path] {
+					continue
+				}
+				archived[path] = true
 
+				archiveName := fmt.Sprintf("%s_%s.zip", a.Name, timestamp)
+				logger.Info("archiving app data before deletion",
+					zap.String("path", path),
+					zap.String("archiveDir", archiveDir),
+					zap.String("archiveName", archiveName))
+
+				if err := docker.ArchivePath(ctx, path, archiveDir, a.Name, archiveName); err != nil {
+					logger.Error("failed to archive app data",
+						zap.String("path", path),
+						zap.Error(err))
+				}
+			}
+		}
+	}
+
+	// Delete volume paths after archiving
+	for _, app := range a.Services {
+		for _, volume := range app.Volumes {
+			if strings.Contains(volume.Source, a.Name) {
+				path := filepath.Join(strings.Split(volume.Source, a.Name)[0], a.Name)
+				if err := docker.RemovePathAsRoot(ctx, path); err != nil {
+					logger.Error("failed to remove volume path", zap.String("path", path), zap.Error(err))
 					go PublishEventWrapper(ctx, common.EventTypeImageRemoveError, map[string]string{
 						common.PropertyTypeMessage.Name: err.Error(),
 					})
