@@ -600,7 +600,7 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 	if dataRoot == "" {
 		dataRoot = "/DATA"
 	}
-	archiveDir := filepath.Join(dataRoot, "AppData", "archive")
+	archiveDir := filepath.Join(dataRoot, "AppData")
 	timestamp := time.Now().Format("20060102_150405")
 	archived := make(map[string]bool)
 
@@ -619,7 +619,7 @@ func (a *ComposeApp) Uninstall(ctx context.Context, deleteConfigFolder bool) err
 					zap.String("archiveDir", archiveDir),
 					zap.String("archiveName", archiveName))
 
-				if err := docker.ArchivePathAsRoot(ctx, path, archiveDir, archiveName); err != nil {
+				if err := docker.ArchivePath(ctx, path, archiveDir, a.Name, archiveName); err != nil {
 					logger.Error("failed to archive app data",
 						zap.String("path", path),
 						zap.Error(err))
