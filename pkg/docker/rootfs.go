@@ -1,8 +1,10 @@
 package docker
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,10 +123,11 @@ func execAsRoot(ctx context.Context, cli *client.Client, cmd []string) error {
 	}
 }
 
-// ArchivePathAsRoot creates a zip archive of the given directory by running
-// zip as root inside the CasaOS container. The archive is saved to archiveDir
-// and ownership is set to PUID:PGID so non-root users can manage it.
-func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string, archiveName string) error {
+// ArchivePath creates a zip archive of the given directory using Go's
+// archive/zip package. The archive is created as the current process user
+// (non-root), so the resulting file is owned by the normal user. Files that
+// cannot be read (e.g. root-owned) are skipped with a warning.
+func ArchivePath(ctx context.Context, sourcePath string, archiveDir string, appName string, archiveName string) error {
 	if sourcePath == "" {
 		return fmt.Errorf("source path cannot be empty")
 	}
@@ -135,58 +138,88 @@ func ArchivePathAsRoot(ctx context.Context, sourcePath string, archiveDir string
 	}
 	defer cli.Close()
 
-	opCtx, cancel := context.WithTimeout(ctx, archiveOpTimeout)
-	defer cancel()
-
-	absSource := resolveContainerPath(opCtx, cli, sourcePath)
-	absArchiveDir := resolveContainerPath(opCtx, cli, archiveDir)
-
-	logger.Info("ArchivePathAsRoot", zap.String("source", absSource), zap.String("archiveDir", absArchiveDir), zap.String("name", archiveName))
+	absSource := resolveContainerPath(ctx, cli, sourcePath)
+	absArchiveDir := resolveContainerPath(ctx, cli, archiveDir)
 
 	if err := validatePath(absSource); err != nil {
-		return fmt.Errorf("root archive refused: %w", err)
+		return fmt.Errorf("archive refused: %w", err)
 	}
 
 	if _, err := os.Stat(absSource); os.IsNotExist(err) {
 		return nil
 	}
 
-	// Create archive directory as root
-	if err := execAsRoot(opCtx, cli, []string{"mkdir", "-p", absArchiveDir}); err != nil {
-		return fmt.Errorf("failed to create archive directory: %w", err)
-	}
-
-	puid := os.Getenv("PUID")
-	if puid == "" {
-		puid = "1000"
-	}
-	pgid := os.Getenv("PGID")
-	if pgid == "" {
-		pgid = "1000"
-	}
-
 	safeName := sanitizeShellArg(archiveName)
-	safePuid := sanitizeShellArg(puid)
-	safePgid := sanitizeShellArg(pgid)
 	archivePath := filepath.Join(absArchiveDir, safeName)
 
-	cmd := fmt.Sprintf(
-		"cd %s && zip -r %s . > /dev/null 2>&1 && chown %s:%s %s",
-		absSource, archivePath, safePuid, safePgid, archivePath,
-	)
+	zipFile, err := os.Create(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to create archive file: %w", err)
+	}
+	defer zipFile.Close()
 
-	if err := execAsRoot(opCtx, cli, []string{"sh", "-c", cmd}); err != nil {
+	w := zip.NewWriter(zipFile)
+	defer w.Close()
+
+	err = filepath.Walk(absSource, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			logger.Info("skipping unreadable file", zap.String("path", path), zap.Error(err))
+			return nil
+		}
+
+		relPath, err := filepath.Rel(absSource, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath == "." {
+			return nil
+		}
+
+		if info.IsDir() {
+			_, err := w.Create(relPath + "/")
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			logger.Info("skipping unreadable file", zap.String("path", path), zap.Error(err))
+			return nil
+		}
+		defer f.Close()
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		header.Method = zip.Deflate
+
+		writer, err := w.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(writer, f)
+		return err
+	})
+
+	if err != nil {
+		os.Remove(archivePath)
 		return fmt.Errorf("failed to archive path: %w", err)
 	}
 
-	pruneOldArchives(absArchiveDir, maxArchives)
+	pruneOldArchives(absArchiveDir, appName, maxArchives)
 
 	return nil
 }
 
-// pruneOldArchives removes the oldest zip files in dir when the count
-// exceeds maxKeep. Files are sorted by modification time (oldest first).
-func pruneOldArchives(dir string, maxKeep int) {
+// pruneOldArchives removes the oldest archive zip files for a specific app
+// when the count exceeds maxKeep. Only matches files with the exact pattern
+// {appName}_{YYYYMMDD}_{HHMMSS}.zip to avoid touching user files.
+func pruneOldArchives(dir string, appName string, maxKeep int) {
+	pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(appName) + `_\d{8}_\d{6}\.zip$`)
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -194,7 +227,7 @@ func pruneOldArchives(dir string, maxKeep int) {
 
 	var zips []os.DirEntry
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".zip") {
+		if !e.IsDir() && pattern.MatchString(e.Name()) {
 			zips = append(zips, e)
 		}
 	}
