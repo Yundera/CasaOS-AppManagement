@@ -104,15 +104,24 @@ func main() {
 	}
 
 	// register at message bus
-	{
+	for i := 0; i < 10; i++ {
 		response, err := service.MyService.MessageBus().RegisterEventTypesWithResponse(ctx, common.EventTypes)
 		if err != nil {
-			logger.Error("error when trying to register one or more event types - some event type will not be discoverable", zap.Error(err))
+			logger.Error("error when trying to register one or more event types - retrying", zap.Error(err), zap.Int("attempt", i+1))
+			time.Sleep(time.Second)
+			continue
 		}
-
-		if response != nil && response.StatusCode() != http.StatusOK {
-			logger.Error("error when trying to register one or more event types - some event type will not be discoverable", zap.String("status", response.Status()), zap.String("body", string(response.Body)))
+		if response == nil {
+			logger.Error("error when trying to register one or more event types - nil response, retrying", zap.Int("attempt", i+1))
+			time.Sleep(time.Second)
+			continue
 		}
+		if response.StatusCode() != http.StatusOK {
+			logger.Error("error when trying to register one or more event types - retrying", zap.String("status", response.Status()), zap.String("body", string(response.Body)), zap.Int("attempt", i+1))
+			time.Sleep(time.Second)
+			continue
+		}
+		break
 	}
 
 	// setup listener
