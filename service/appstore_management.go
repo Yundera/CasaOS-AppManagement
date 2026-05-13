@@ -22,6 +22,8 @@ import (
 
 var ErrAppStoreSourceExists = fmt.Errorf("appstore source already exists")
 
+const DefaultAppStoreURL = "https://github.com/Yundera/AppStore/archive/refs/heads/main.zip"
+
 type AppStoreManagement struct {
 	isAppUpgradable      gcache.Cache
 	defaultAppStore      AppStore
@@ -301,8 +303,14 @@ func (a *AppStoreManagement) CategoryMap() (map[string]codegen.CategoryInfo, err
 	}
 
 	if allFailed {
-		logger.Info("all appstores failed to load category map, using default")
+		logger.Info("all appstores failed to load category map")
 
+		if a.defaultAppStore == nil {
+			logger.Info("WARNING - no default appstore")
+			return map[string]codegen.CategoryInfo{}, nil
+		}
+
+		logger.Info("Using default appstore")
 		categoryMap, err = a.defaultAppStore.CategoryMap()
 		if err != nil {
 			return nil, err
@@ -420,6 +428,20 @@ func (a *AppStoreManagement) Catalog() (map[string]*ComposeApp, error) {
 	}
 
 	return catalog, nil
+}
+
+func (a *AppStoreManagement) CatalogByStoreID(storeID int) (map[string]*ComposeApp, error) {
+	if storeID < 0 || storeID >= len(config.ServerInfo.AppStoreList) {
+		return nil, fmt.Errorf("appstore id %d is not found", storeID)
+	}
+
+	appStoreURL := config.ServerInfo.AppStoreList[storeID]
+	appStore, err := AppStoreByURL(appStoreURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return appStore.Catalog()
 }
 
 func (a *AppStoreManagement) UpdateCatalog() error {
@@ -611,6 +633,15 @@ func NewAppStoreManagement() *AppStoreManagement {
 		defaultAppStore: defaultAppStore,
 		isAppUpgradable: gcache.New(100).LRU().Expiration(1 * time.Hour).Build(),
 		isAppUpgrading:  sync.Map{},
+	}
+
+	if len(config.ServerInfo.AppStoreList) == 0 {
+		logger.Info("no appstores in config, auto-registering Yundera default", zap.String("url", DefaultAppStoreURL))
+		go func() {
+			if err := appStoreManagement.RegisterAppStoreSync(context.Background(), DefaultAppStoreURL); err != nil {
+				logger.Error("failed to auto-register default appstore", zap.Error(err), zap.String("url", DefaultAppStoreURL))
+			}
+		}()
 	}
 
 	return appStoreManagement

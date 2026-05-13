@@ -91,6 +91,18 @@ func (a *AppManagement) RegisterAppStoreSync(ctx echo.Context, params codegen.Re
 	})
 }
 
+func (a *AppManagement) RefreshAppStores(ctx echo.Context) error {
+	if err := service.MyService.AppStoreManagement().UpdateCatalog(); err != nil {
+		message := err.Error()
+		logger.Error("failed to refresh appstores", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{Message: &message})
+	}
+
+	return ctx.JSON(http.StatusOK, codegen.AppStoreRegisterOK{
+		Message: utils.Ptr("appstores refreshed"),
+	})
+}
+
 func (a *AppManagement) UnregisterAppStore(ctx echo.Context, id codegen.AppStoreID) error {
 	appStoreList := service.MyService.AppStoreManagement().AppStoreList()
 
@@ -116,7 +128,14 @@ func (a *AppManagement) UnregisterAppStore(ctx echo.Context, id codegen.AppStore
 
 func (a *AppManagement) ComposeAppStoreInfoList(ctx echo.Context, params codegen.ComposeAppStoreInfoListParams) error {
 
-	catalog, err := service.MyService.AppStoreManagement().Catalog()
+	var catalog map[string]*service.ComposeApp
+	var err error
+
+	if params.StoreId != nil {
+		catalog, err = service.MyService.AppStoreManagement().CatalogByStoreID(*params.StoreId)
+	} else {
+		catalog, err = service.MyService.AppStoreManagement().Catalog()
+	}
 	if err != nil {
 		message := err.Error()
 		logger.Error("failed to get catalog", zap.Error(err))

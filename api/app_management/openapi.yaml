@@ -259,6 +259,20 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /appstore/refresh:
+    post:
+      summary: Refresh all registered app stores
+      description: |
+        Force-refresh the catalog for every registered app store. Equivalent to triggering the periodic catalog update on demand.
+      operationId: refreshAppStores
+      tags:
+        - AppStore methods
+      responses:
+        "200":
+          $ref: "#/components/responses/AppStoreRegisterOK"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /appstore/{id}:
     delete:
       summary: Unregister an app store
@@ -301,6 +315,7 @@ paths:
         - $ref: "#/components/parameters/StoreAppCategoryFilter"
         - $ref: "#/components/parameters/StoreAppAuthorTypeFilter"
         - $ref: "#/components/parameters/StoreAppRecommendedFilter"
+        - $ref: "#/components/parameters/StoreAppStoreIDFilter"
       responses:
         "200":
           $ref: "#/components/responses/ComposeAppStoreInfoListsOK"
@@ -778,6 +793,14 @@ components:
       schema:
         type: boolean
         default: false
+
+    StoreAppStoreIDFilter:
+      name: store_id
+      description: Restrict result to apps from a single registered app store (by ID). Disables cross-store deduplication so duplicates remain visible.
+      in: query
+      schema:
+        type: integer
+        example: 0
 
     ComposeAppID:
       name: id
