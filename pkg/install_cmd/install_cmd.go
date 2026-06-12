@@ -63,9 +63,14 @@ func ExecuteInstallCmd(composeApp *codegen.ComposeApp, cmdType string) error {
 	execCmd := exec.Command("/bin/bash", "-c", cmdString)
 
 	// Set environment variables that might be needed for Docker
+	// AppID must be exported explicitly: store install-cmds reference $AppID,
+	// and compose-level interpolation does not apply to x-casaos command
+	// strings. Without it, paths like /DATA/AppData/$AppID collapse to
+	// /DATA/AppData and commands operate on every app's data.
 	execCmd.Env = append(os.Environ(),
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"DOCKER_HOST=unix:///var/run/docker.sock")
+		"DOCKER_HOST=unix:///var/run/docker.sock",
+		"AppID="+composeApp.Name)
 
 	// Ensure the command has access to standard streams
 	execCmd.Stdin = os.Stdin
