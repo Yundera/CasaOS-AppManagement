@@ -6,6 +6,10 @@ const (
 
 	AppsDirectoryName = "Apps"
 
+	// AppNameCasaOS is CasaOS's own compose project on a PCS. It is excluded from
+	// the app grid: CasaOS is what renders that grid, not one of the apps in it.
+	AppNameCasaOS = "casaos"
+
 	ComposeAppAuthorCasaOSTeam = "CasaOS Team"
 
 	ComposeExtensionNameXCasaOS                = "x-casaos"

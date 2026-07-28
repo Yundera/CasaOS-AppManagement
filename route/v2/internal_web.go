@@ -109,6 +109,13 @@ func (a *AppManagement) GetAppGrid(ctx echo.Context) error {
 	appGridItems = append(appGridItems, v1AppGridItems...)
 	appGridItems = append(appGridItems, containerAppGridItems...)
 
+	// CasaOS ships itself as a compose app on a PCS, so it shows up as a tile in
+	// its own grid — with no icon and no index to open. Drop it whichever source
+	// it came from.
+	appGridItems = lo.Filter(appGridItems, func(item codegen.WebAppGridItem, _ int) bool {
+		return item.Name == nil || *item.Name != common.AppNameCasaOS
+	})
+
 	return ctx.JSON(http.StatusOK, codegen.GetWebAppGridOK{
 		Message: utils.Ptr("This data is for internal use ONLY - will not be supported for public use."),
 		Data:    &appGridItems,
